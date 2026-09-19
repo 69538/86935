@@ -1,0 +1,3123 @@
+package com.hd.stream.iptv;
+
+import android.app.AlertDialog;
+import android.app.PictureInPictureParams;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.graphics.Color;
+import android.graphics.PorterDuff;
+import android.media.AudioManager;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.Base64;
+import android.util.DisplayMetrics;
+import android.util.Log;
+import android.util.Rational;
+import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
+import android.widget.ArrayAdapter;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.ListView;
+import android.widget.ProgressBar;
+import android.widget.TextView;
+import android.widget.Toast;
+import androidx.annotation.NonNull;
+import androidx.annotation.OptIn;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.media3.common.C;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
+import androidx.media3.common.TrackGroup;
+import androidx.media3.common.TrackSelectionOverride;
+import androidx.media3.common.TrackSelectionParameters;
+import androidx.media3.common.Tracks;
+import androidx.media3.common.util.UnstableApi;
+import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.exoplayer.DefaultLoadControl;
+import androidx.media3.exoplayer.DefaultRenderersFactory;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.drm.DefaultDrmSessionManager;
+import androidx.media3.exoplayer.drm.FrameworkMediaDrm;
+import androidx.media3.exoplayer.drm.HttpMediaDrmCallback;
+import androidx.media3.exoplayer.drm.LocalMediaDrmCallback;
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import androidx.media3.extractor.DefaultExtractorsFactory;
+import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory;
+import androidx.media3.ui.AspectRatioFrameLayout;
+import androidx.media3.ui.PlayerView;
+import android.widget.ScrollView;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
+import okhttp3.Cookie;
+import okhttp3.CookieJar;
+import okhttp3.HttpUrl;
+import okhttp3.OkHttpClient;
+
+// ✅ OkHttp Network Imports
+import okhttp3.Callback;
+import okhttp3.Request;
+import okhttp3.Response;
+// ✅ Java I/O aur JSON Imports
+import java.io.File;
+import java.io.IOException;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import android.view.KeyEvent;
+
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.view.LayoutInflater;
+import androidx.recyclerview.widget.RecyclerView;
+import android.widget.EditText;
+
+@OptIn(markerClass = UnstableApi.class)
+public class PlayerActivity extends AppCompatActivity {
+
+    private PlayerView playerView;
+    private ExoPlayer player;
+    private final Map<String, List<Cookie>> cookieStore = new HashMap<>();
+    private int tokenRefreshCount = 0;
+
+    private boolean isMuted = false;
+    // ✅ Default mode 1 (FILL) set kiya gaya hai 1st time initialization ke liye
+    private int resizeModeIndex = 1;
+
+    // 💎 Screen Lock & Top Bar Custom Variables
+    private boolean isScreenLocked = false;
+    private TextView tvChannelTitle;
+    private ImageView btnLockScreen;
+    private ImageView btnUnlockFloating;
+
+    private ImageView btnMute;
+    private TextView btnZoom;
+    // 💎 Background Resume State Variables
+    private long playbackPosition = 0;
+    private int currentWindow = 0;
+    private boolean playWhenReady = true;
+
+    // 💎 Custom Circular Progress Hud Variables
+    private FrameLayout premiumGestureHud;
+    private ProgressBar hudCircularProgress;
+    private ImageView imgPremiumIconHud;
+    private TextView txtPremiumPercentage;
+    private final Handler gestureHideHandler = new Handler(Looper.getMainLooper());
+    private Runnable gestureHideRunnable;
+    private final Handler webHandler = new Handler(Looper.getMainLooper());
+    private final android.os.Handler autoHideHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable autoHideRunnable = this::hideAllCustomControls;
+    private LinearLayout topBarLayout;
+    private FrameLayout sideNavContainer;
+    private FrameLayout lockOverlay;
+    private final Handler fastZappingHandler = new Handler(Looper.getMainLooper());
+    private Runnable fastZappingRunnable;
+
+    // 🚀 Single Thread Executor for Safe Background EPG & Logo Loading (Prevents Lag & Crashes)
+    private final java.util.concurrent.ExecutorService epgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
+    private java.util.concurrent.Future<?> currentEpgTask = null;
+
+    private final Handler numberZappingHandler = new Handler(Looper.getMainLooper());
+    private Runnable numberZappingRunnable;
+    private StringBuilder channelNumberBuilder = new StringBuilder();
+    private TextView tvNumberZappingHud;
+
+    private android.graphics.drawable.GradientDrawable getTVFocusDrawable() {
+        android.graphics.drawable.GradientDrawable gd = new android.graphics.drawable.GradientDrawable();
+        gd.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
+        gd.setColor(Color.parseColor("#44FFFFFF"));
+        gd.setCornerRadius(24 * getResources().getDisplayMetrics().density);
+        return gd;
+    }
+
+    private android.graphics.drawable.GradientDrawable getTVUnlockFocusDrawable() {
+        android.graphics.drawable.GradientDrawable gd = new android.graphics.drawable.GradientDrawable();
+        gd.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
+        gd.setColor(Color.parseColor("#33FFFFFF"));
+        gd.setCornerRadius(24 * getResources().getDisplayMetrics().density);
+        return gd;
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        int keyCode = event.getKeyCode();
+        int action = event.getAction();
+
+        // 1. Agar Screen Locked hai to sirf Back Button ya Unlock Button chalna chahiye
+        if (isScreenLocked) {
+            if (keyCode == KeyEvent.KEYCODE_BACK) {
+                return super.dispatchKeyEvent(event);
+            }
+            if (lockOverlay != null && lockOverlay.getVisibility() == View.VISIBLE) {
+                if (btnUnlockFloating != null && btnUnlockFloating.hasFocus()) {
+                    return super.dispatchKeyEvent(event);
+                }
+            }
+            return true;
+        }
+
+        // 2. Agar Quick Menu VISIBLE hai
+        if (quickMenuOverlay != null && quickMenuOverlay.getVisibility() == View.VISIBLE) {
+            return super.dispatchKeyEvent(event);
+        }
+
+        // 🎯 3. RIGHT BUTTON DABANE PAR QUALITY LAYOUT DIKHE
+        if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+            if (topBarLayout == null || topBarLayout.getVisibility() != View.VISIBLE) {
+                if (action == KeyEvent.ACTION_DOWN) {
+                    hideDthOverlayImmediately();
+                    launchOfficialMultiTabTracksDialog();
+                }
+                return true;
+            } else {
+                resetAutoHideTimer();
+                return super.dispatchKeyEvent(event);
+            }
+        }
+
+        // 4. Remote LEFT dabane par Quick Menu open hoga
+        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && (topBarLayout == null || topBarLayout.getVisibility() != View.VISIBLE)) {
+            if (action == KeyEvent.ACTION_DOWN) {
+                toggleQuickMenu();
+            }
+            return true;
+        }
+
+        // 5. DPAD UP ya CHANNEL UP
+        if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_CHANNEL_UP) {
+            if (topBarLayout != null && topBarLayout.getVisibility() == View.VISIBLE) {
+                resetAutoHideTimer();
+                return super.dispatchKeyEvent(event);
+            }
+            if (action == KeyEvent.ACTION_DOWN) {
+                playNextChannel();
+            }
+            return true;
+        }
+
+        // 6. DPAD DOWN ya CHANNEL DOWN
+        if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN || keyCode == KeyEvent.KEYCODE_CHANNEL_DOWN) {
+            if (topBarLayout != null && topBarLayout.getVisibility() == View.VISIBLE) {
+                resetAutoHideTimer();
+                return super.dispatchKeyEvent(event);
+            }
+            if (action == KeyEvent.ACTION_DOWN) {
+                playPreviousChannel();
+            }
+            return true;
+        }
+
+        // 7. DPAD Navigation
+        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+            if (topBarLayout != null && topBarLayout.getVisibility() == View.VISIBLE) {
+                resetAutoHideTimer();
+                return super.dispatchKeyEvent(event);
+            }
+        }
+
+        // 🔢 8. NUMBER KEYPAD ZAPPING (0-9 Remote Keys)
+        if (keyCode >= KeyEvent.KEYCODE_0 && keyCode <= KeyEvent.KEYCODE_9) {
+            if (action == KeyEvent.ACTION_DOWN) {
+                int digit = keyCode - KeyEvent.KEYCODE_0;
+                handleNumberZappingInput(digit);
+            }
+            return true;
+        } else if (keyCode >= KeyEvent.KEYCODE_NUMPAD_0 && keyCode <= KeyEvent.KEYCODE_NUMPAD_9) {
+            if (action == KeyEvent.ACTION_DOWN) {
+                int digit = keyCode - KeyEvent.KEYCODE_NUMPAD_0;
+                handleNumberZappingInput(digit);
+            }
+            return true;
+        }
+
+        // 9. OK / CENTER BUTTON FIX (TV Remote) - Tap aur Long Press dono ke liye
+        if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+            if (topBarLayout != null && topBarLayout.getVisibility() == View.VISIBLE) {
+                resetAutoHideTimer();
+                return super.dispatchKeyEvent(event);
+            }
+
+            if (action == KeyEvent.ACTION_DOWN) {
+                event.startTracking();
+                if (event.getRepeatCount() > 0) {
+                    // Long Press par DTH Info Overlay show hoga
+                    hideDthOverlayImmediately();
+                    if (LiveTvActivity.staticChannelList != null && LiveTvActivity.staticCurrentIndex >= 0 && LiveTvActivity.staticCurrentIndex < LiveTvActivity.staticChannelList.size()) {
+                        ChannelItem currentCh = LiveTvActivity.staticChannelList.get(LiveTvActivity.staticCurrentIndex);
+                        showDthInfoOverlay(currentCh, LiveTvActivity.staticCurrentIndex);
+                    }
+                    return true;
+                }
+            } else if (action == KeyEvent.ACTION_UP) {
+                if (!event.isCanceled()) {
+                    // Normal Short Tap par Custom Controls open honge
+                    hideDthOverlayImmediately();
+                    showAllCustomControls();
+                }
+                return true;
+            }
+            return true;
+        }
+
+        return super.dispatchKeyEvent(event);
+    }
+
+    // =========================================================================
+    // 📺 DTH INFO OVERLAY
+    // =========================================================================
+    private final Handler dthOverlayHandler = new Handler(Looper.getMainLooper());
+    private Runnable dthOverlayRunnable;
+
+    private String getCurrentDateTimeString() {
+        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("hh:mm a  |  EEE, dd MMM yyyy", java.util.Locale.ENGLISH);
+        return sdf.format(new java.util.Date());
+    }
+
+    private String getCurrentPlayingQuality() {
+        if (player == null) return "AUTO HD";
+        try {
+            androidx.media3.common.Format format = player.getVideoFormat();
+            if (format != null && format.height > 0) {
+                int h = format.height;
+                if (h >= 2160) return "4K UHD";
+                if (h >= 1080) return "1080p FHD";
+                if (h >= 720) return "720p HD";
+                if (h >= 576) return "576p SD";
+                if (h >= 480) return "480p SD";
+                return h + "p";
+            }
+        } catch (Exception ignored) {}
+        return "AUTO HD";
+    }
+
+    private String getCurrentPlayingAudio() {
+        if (player == null) return "STEREO";
+        try {
+            androidx.media3.common.Format format = player.getAudioFormat();
+            if (format != null) {
+                if (format.channelCount > 2) return "5.1 DOLBY";
+                if (format.channelCount == 2) return "STEREO";
+                if (format.channelCount == 1) return "MONO";
+            }
+        } catch (Exception ignored) {}
+        return "STEREO";
+    }
+
+    private void handleNumberZappingInput(int digit) {
+        if (isScreenLocked) return;
+
+        // Hide other overlays if active
+        hideDthOverlayImmediately();
+        hideQuickMenu();
+
+        channelNumberBuilder.append(digit);
+
+        // Show on-screen zapping HUD (Aap ise layout me bhi add kar sakte hain)
+        showNumberZappingHud(channelNumberBuilder.toString());
+
+        if (numberZappingRunnable != null) {
+            numberZappingHandler.removeCallbacks(numberZappingRunnable);
+        }
+
+        numberZappingRunnable = () -> {
+            executeChannelJump(channelNumberBuilder.toString());
+            channelNumberBuilder.setLength(0); // Reset buffer
+        };
+
+        // User ke 1.5 seconds rukne par channel switch ho jayega
+        numberZappingHandler.postDelayed(numberZappingRunnable, 1500);
+    }
+
+    private void executeChannelJump(String numberStr) {
+        hideNumberZappingHud();
+        try {
+            int targetNumber = Integer.parseInt(numberStr);
+            int targetIndex = targetNumber - 1; // 1-based index to 0-based index
+
+            if (LiveTvActivity.staticChannelList != null && !LiveTvActivity.staticChannelList.isEmpty()) {
+                if (targetIndex >= 0 && targetIndex < LiveTvActivity.staticChannelList.size()) {
+                    LiveTvActivity.staticCurrentIndex = targetIndex;
+                    ChannelItem channel = LiveTvActivity.staticChannelList.get(targetIndex);
+                    if (channel != null && channel.getStreamUrl() != null) {
+                        prepareAndPlay(channel.getStreamUrl(), false);
+                        showDthInfoOverlay(channel, LiveTvActivity.staticCurrentIndex);
+                    }
+                } else {
+                    Toast.makeText(this, "Channel " + targetNumber + " not found", Toast.LENGTH_SHORT).show();
+                }
+            }
+        } catch (Exception e) {
+            channelNumberBuilder.setLength(0);
+        }
+    }
+
+    private void showNumberZappingHud(String text) {
+        // Aap chaho toh screen par ek chota floating TextView bana kar number dikha sakte ho
+        if (tvChannelTitle != null) {
+            tvChannelTitle.setText("Channel: " + text);
+            if (topBarLayout != null) topBarLayout.setVisibility(View.VISIBLE);
+        }
+    }
+
+    private void hideNumberZappingHud() {
+        // Auto hide top bar or zapping indicator after jump
+        resetAutoHideTimer();
+    }
+
+    private void updateDthQualityAndAudioBadges() {
+        TextView tvQualityBadge = findViewById(R.id.tv_dth_quality_badge);
+        TextView tvAudioBadge = findViewById(R.id.tv_dth_audio_badge);
+        if (tvQualityBadge != null) {
+            tvQualityBadge.setText(getCurrentPlayingQuality());
+        }
+        if (tvAudioBadge != null) {
+            tvAudioBadge.setText(getCurrentPlayingAudio());
+        }
+    }
+
+    private void showDthInfoOverlay(ChannelItem channel, int channelIndex) {
+        LinearLayout dthOverlay = findViewById(R.id.dth_info_overlay);
+        TextView tvChannelName = findViewById(R.id.tv_dth_channel_name);
+        TextView tvDateTime = findViewById(R.id.tv_dth_date_time);
+        TextView tvStatus = findViewById(R.id.tv_dth_status);
+        ImageView ivLogo = findViewById(R.id.iv_dth_logo);
+
+        TextView tvEpgTitle = findViewById(R.id.tv_dth_epg_title);
+        TextView tvEpgTime = findViewById(R.id.tv_dth_epg_time);
+        TextView tvNextEpg = findViewById(R.id.tv_dth_next_epg);
+        ProgressBar pbEpgProgress = findViewById(R.id.pb_dth_epg_progress);
+
+        if (dthOverlay == null) return;
+
+        String chName = (channel != null && channel.getName() != null) ? channel.getName() : "Live Channel";
+        String formattedText = (channelIndex + 1) + " • " + chName.toUpperCase();
+
+        if (tvChannelName != null) {
+            tvChannelName.setText(formattedText);
+        }
+
+        if (tvChannelTitle != null) {
+            tvChannelTitle.setText(formattedText);
+        }
+
+        String category = (channel != null && channel.getGroupTitle() != null && !channel.getGroupTitle().trim().isEmpty())
+                ? channel.getGroupTitle().trim()
+                : "General Broadcast";
+
+        if (tvStatus != null) {
+            tvStatus.setText(category + " • Live Stream HD");
+        }
+
+        if (tvDateTime != null) {
+            tvDateTime.setText(getCurrentDateTimeString());
+        }
+
+        updateDthQualityAndAudioBadges();
+
+        if (ivLogo != null && (ivLogo.getDrawable() == null || ivLogo.getTag() == null)) {
+            ivLogo.setImageResource(R.drawable.image_channel_loader);
+        }
+
+        // ⚡ Fast Single-Thread Executor for EPG & Logo fetching with optimized timeouts
+        if (channel != null) {
+            final String tvgId = channel.getTvgId();
+            final String channelTitle = channel.getName();
+            final String logoUrl = (channel.getLogoUrl() != null) ? channel.getLogoUrl().trim() : "";
+
+            if (ivLogo != null && !logoUrl.isEmpty()) {
+                ivLogo.setTag(logoUrl);
+            }
+
+            if (currentEpgTask != null && !currentEpgTask.isDone()) {
+                currentEpgTask.cancel(true);
+            }
+
+            currentEpgTask = epgExecutor.submit(() -> {
+                try {
+                    if (Thread.currentThread().isInterrupted()) return;
+
+                    EpgProgram currentShow = EpgManager.getInstance().getCurrentProgram(tvgId, channelTitle);
+                    EpgProgram nextShow = EpgManager.getInstance().getNextProgram(tvgId, channelTitle);
+                    java.text.SimpleDateFormat timeFormat = new java.text.SimpleDateFormat("hh:mm a", java.util.Locale.getDefault());
+
+                    String currentTitleText = (currentShow != null) ? currentShow.title : category.toUpperCase();
+                    String currentTimeText = "Live Broadcast";
+                    int currentProgressVal = 0;
+                    boolean hasProgress = false;
+
+                    if (currentShow != null) {
+                        String startTime = timeFormat.format(new java.util.Date(currentShow.startTime));
+                        String endTime = timeFormat.format(new java.util.Date(currentShow.endTime));
+                        currentTimeText = startTime + " - " + endTime;
+                        currentProgressVal = currentShow.getProgressPercentage();
+                        hasProgress = true;
+                    }
+
+                    String nextShowFormatted = "No EPG Available";
+                    if (nextShow != null) {
+                        String nextStartTime = timeFormat.format(new java.util.Date(nextShow.startTime));
+                        long diffMillis = nextShow.startTime - System.currentTimeMillis();
+                        String timeRemainingStr = "";
+                        if (diffMillis > 0) {
+                            long minutes = java.util.concurrent.TimeUnit.MILLISECONDS.toMinutes(diffMillis) % 60;
+                            long hours = java.util.concurrent.TimeUnit.MILLISECONDS.toHours(diffMillis);
+
+                            if (hours > 0) {
+                                timeRemainingStr = " (in " + hours + "h " + minutes + "m)";
+                            } else {
+                                timeRemainingStr = " (in " + minutes + " mins)";
+                            }
+                        }
+                        nextShowFormatted = nextShow.title + " (" + nextStartTime + ")" + timeRemainingStr;
+                    }
+
+                    android.graphics.Bitmap bmp = null;
+                    if (!logoUrl.isEmpty()) {
+                        try {
+                            java.net.URL url = new java.net.URL(logoUrl);
+                            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+                            conn.setConnectTimeout(800);
+                            conn.setReadTimeout(800);
+                            conn.connect();
+
+                            if (conn.getResponseCode() == java.net.HttpURLConnection.HTTP_OK) {
+                                java.io.InputStream in = conn.getInputStream();
+                                bmp = android.graphics.BitmapFactory.decodeStream(in);
+                                in.close();
+                            }
+                        } catch (Exception ignored) {}
+                    }
+
+                    if (Thread.currentThread().isInterrupted()) return;
+
+                    final String finalCurrTitle = currentTitleText;
+                    final String finalCurrTime = currentTimeText;
+                    final boolean finalHasProgress = hasProgress;
+                    final int finalProgressVal = currentProgressVal;
+                    final String finalNextText = nextShowFormatted;
+                    final android.graphics.Bitmap finalBmp = bmp;
+
+                    runOnUiThread(() -> {
+                        if (dthOverlay.getVisibility() == View.VISIBLE) {
+                            if (tvEpgTitle != null) tvEpgTitle.setText(finalCurrTitle);
+                            if (tvEpgTime != null) tvEpgTime.setText(finalCurrTime);
+
+                            if (pbEpgProgress != null) {
+                                if (finalHasProgress) {
+                                    pbEpgProgress.setVisibility(View.VISIBLE);
+                                    pbEpgProgress.setProgress(finalProgressVal);
+                                } else {
+                                    pbEpgProgress.setVisibility(View.INVISIBLE);
+                                }
+                            }
+
+                            if (tvNextEpg != null) {
+                                tvNextEpg.setText(finalNextText);
+                                tvNextEpg.setVisibility(View.VISIBLE);
+                            }
+
+                            if (ivLogo != null && finalBmp != null && logoUrl.equals(ivLogo.getTag())) {
+                                ivLogo.setImageBitmap(finalBmp);
+                            }
+                        }
+                    });
+                } catch (Exception ignored) {}
+            });
+        }
+
+        if (dthOverlayRunnable != null) {
+            dthOverlayHandler.removeCallbacks(dthOverlayRunnable);
+        }
+
+        if (dthOverlay.getVisibility() != View.VISIBLE) {
+            dthOverlay.setTranslationY(0f);
+            dthOverlay.setAlpha(1.0f);
+            dthOverlay.setVisibility(View.VISIBLE);
+        }
+
+        dthOverlayRunnable = () -> {
+            dthOverlay.animate()
+                    .alpha(0.0f)
+                    .setDuration(300)
+                    .withEndAction(() -> {
+                        dthOverlay.setVisibility(View.GONE);
+                        dthOverlay.setAlpha(1.0f);
+                    })
+                    .start();
+        };
+
+        dthOverlayHandler.postDelayed(dthOverlayRunnable, 4000);
+    }
+
+    private void hideDthOverlayImmediately() {
+        LinearLayout dthOverlay = findViewById(R.id.dth_info_overlay);
+        if (dthOverlay != null) {
+            if (dthOverlayRunnable != null) {
+                dthOverlayHandler.removeCallbacks(dthOverlayRunnable);
+            }
+            dthOverlay.animate().cancel();
+            dthOverlay.setVisibility(View.GONE);
+        }
+    }
+
+    private LinearLayout quickMenuOverlay;
+    private EditText etQuickSearch;
+    private RecyclerView rvQuickCategories, rvQuickChannels;
+    private QuickChannelAdapter quickChannelAdapter;
+    private QuickCategoryAdapter quickCategoryAdapter;
+    private List<ChannelItem> displayedChannels = new ArrayList<>();
+    private List<String> categoryList = new ArrayList<>();
+    private String selectedCategory = "ALL";
+
+    private void setupQuickChannelMenu() {
+        quickMenuOverlay = findViewById(R.id.quick_channel_menu_overlay);
+        etQuickSearch = findViewById(R.id.et_quick_search);
+        rvQuickCategories = findViewById(R.id.rv_quick_categories);
+        rvQuickChannels = findViewById(R.id.rv_quick_channels);
+        rvQuickChannels.setPreserveFocusAfterLayout(true);
+        rvQuickChannels.setItemAnimator(null);
+        ImageView btnClose = findViewById(R.id.btn_close_quick_menu);
+
+        if (quickMenuOverlay == null) return;
+
+        if (btnClose != null) {
+            btnClose.setOnClickListener(v -> hideQuickMenu());
+        }
+
+        categoryList.clear();
+        categoryList.add("ALL");
+        if (LiveTvActivity.staticChannelList != null) {
+            for (ChannelItem ch : LiveTvActivity.staticChannelList) {
+                String group = ch.getGroupTitle();
+                if (group != null && !group.trim().isEmpty() && !categoryList.contains(group.trim())) {
+                    categoryList.add(group.trim());
+                }
+            }
+        }
+
+        quickCategoryAdapter = new QuickCategoryAdapter(categoryList, cat -> {
+            selectedCategory = cat;
+            filterChannels(etQuickSearch.getText().toString());
+
+            if (rvQuickChannels != null) {
+                rvQuickChannels.scrollToPosition(0);
+
+                if (isTvDevice(PlayerActivity.this)) {
+                    rvQuickChannels.postDelayed(() -> {
+                        RecyclerView.ViewHolder holder = rvQuickChannels.findViewHolderForAdapterPosition(0);
+                        if (holder != null) {
+                            holder.itemView.requestFocus();
+                        } else if (rvQuickChannels.getChildCount() > 0) {
+                            rvQuickChannels.getChildAt(0).requestFocus();
+                        }
+                    }, 50);
+                }
+            }
+        });
+        rvQuickCategories.setAdapter(quickCategoryAdapter);
+
+        displayedChannels = new ArrayList<>();
+        if (LiveTvActivity.staticChannelList != null) {
+            displayedChannels.addAll(LiveTvActivity.staticChannelList);
+        }
+
+        quickChannelAdapter = new QuickChannelAdapter(displayedChannels, (channel, index) -> {
+            if (channel != null && channel.getStreamUrl() != null) {
+                LiveTvActivity.staticCurrentIndex = LiveTvActivity.staticChannelList.indexOf(channel);
+                prepareAndPlay(channel.getStreamUrl(), false);
+                showDthInfoOverlay(channel, LiveTvActivity.staticChannelList.indexOf(channel));
+                hideQuickMenu();
+            }
+        });
+        rvQuickChannels.setAdapter(quickChannelAdapter);
+
+        etQuickSearch.addTextChangedListener(new android.text.TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                filterChannels(s.toString());
+            }
+            @Override
+            public void afterTextChanged(android.text.Editable s) {}
+        });
+    }
+
+    private void filterChannels(String query) {
+        displayedChannels.clear();
+        if (LiveTvActivity.staticChannelList != null) {
+            for (ChannelItem item : LiveTvActivity.staticChannelList) {
+                boolean matchesCategory = selectedCategory.equals("ALL") ||
+                        (item.getGroupTitle() != null && item.getGroupTitle().equalsIgnoreCase(selectedCategory));
+                boolean matchesSearch = query == null || query.trim().isEmpty() ||
+                        (item.getName() != null && item.getName().toLowerCase().contains(query.toLowerCase().trim()));
+
+                if (matchesCategory && matchesSearch) {
+                    displayedChannels.add(item);
+                }
+            }
+        }
+        if (quickChannelAdapter != null) {
+            quickChannelAdapter.notifyDataSetChanged();
+        }
+    }
+
+    private boolean isTvDevice(Context context) {
+        try {
+            if (context.getPackageManager().hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)) return true;
+            android.app.UiModeManager uiModeManager = (android.app.UiModeManager) context.getSystemService(Context.UI_MODE_SERVICE);
+            if (uiModeManager != null && uiModeManager.getCurrentModeType() == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION) return true;
+            return context.getPackageManager().hasSystemFeature("android.hardware.type.television");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public void toggleQuickMenu() {
+        if (isScreenLocked) return;
+        if (quickMenuOverlay == null) return;
+        if (quickMenuOverlay.getVisibility() == View.VISIBLE) {
+            hideQuickMenu();
+        } else {
+            showQuickMenu();
+        }
+    }
+
+    private void showQuickMenu() {
+        if (isScreenLocked || quickMenuOverlay == null) return;
+
+        hideAllCustomControls();
+        if (playerView != null) {
+            playerView.hideController();
+            playerView.setUseController(false);
+        }
+
+        hideDthOverlayImmediately();
+        quickMenuOverlay.setVisibility(View.VISIBLE);
+        quickMenuOverlay.setAlpha(0f);
+        quickMenuOverlay.setTranslationX(-60f);
+        quickMenuOverlay.animate().translationX(0f).alpha(1f).setDuration(250).start();
+
+        if (rvQuickChannels != null && isTvDevice(this)) {
+            rvQuickChannels.postDelayed(() -> rvQuickChannels.requestFocus(), 100);
+        }
+    }
+
+    private void hideQuickMenu() {
+        if (quickMenuOverlay == null || quickMenuOverlay.getVisibility() != View.VISIBLE) return;
+
+        quickMenuOverlay.animate().translationX(-60f).alpha(0f).setDuration(200).withEndAction(() -> {
+            quickMenuOverlay.setVisibility(View.GONE);
+            if (playerView != null) {
+                playerView.setUseController(true);
+            }
+        }).start();
+    }
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        getWindow().setStatusBarColor(Color.parseColor("#000000"));
+        getWindow().setNavigationBarColor(Color.parseColor("#000000"));
+        setContentView(R.layout.activity_player);
+        hideSystemUI();
+        setupQuickChannelMenu();
+        clearApplicationCache();
+
+        getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (isScreenLocked) {
+                    Toast.makeText(PlayerActivity.this, "Screen is Locked! Tap Unlock button first", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+
+                if (quickMenuOverlay != null && quickMenuOverlay.getVisibility() == View.VISIBLE) {
+                    hideQuickMenu();
+                    return;
+                }
+
+                if (findViewById(R.id.dth_info_overlay) != null && findViewById(R.id.dth_info_overlay).getVisibility() == View.VISIBLE) {
+                    hideDthOverlayImmediately();
+                    return;
+                }
+
+                if (player != null) {
+                    player.stop();
+                    player.release();
+                    player = null;
+                }
+
+                finish();
+            }
+        });
+
+        playerView = findViewById(R.id.player_view);
+        premiumGestureHud = findViewById(R.id.premium_gesture_hud);
+        hudCircularProgress = findViewById(R.id.hud_circular_progress);
+        imgPremiumIconHud = findViewById(R.id.img_premium_icon_hud);
+        txtPremiumPercentage = findViewById(R.id.txt_premium_percentage);
+
+        if (premiumGestureHud != null) {
+            premiumGestureHud.setBackgroundResource(R.drawable.hud_progress_ring);
+        }
+        if (hudCircularProgress != null) {
+            hudCircularProgress.setIndeterminate(false);
+            hudCircularProgress.setProgress(0);
+        }
+
+        if (playerView != null) {
+            playerView.setControllerAutoShow(false);
+            playerView.setFocusable(true);
+            playerView.setFocusableInTouchMode(true);
+            playerView.setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS);
+            playerView.setControllerShowTimeoutMs(3500);
+            playerView.setShowSubtitleButton(true);
+            playerView.setKeepScreenOn(true);
+
+            // ✅ INITIAL SETUP: PlayerView ko direct FILL mode par set kiya bina layout error ke
+            playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FILL);
+
+            playerView.setFullscreenButtonClickListener(enterFullscreen -> {
+                toggleFullscreenAndOrientation(enterFullscreen);
+                if (btnZoom != null) {
+                    if (enterFullscreen) {
+                        playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FILL);
+                        if (player != null) {
+                            player.setVideoScalingMode(C.VIDEO_SCALING_MODE_SCALE_TO_FIT);
+                        }
+                        btnZoom.setText("FILL");
+                        resizeModeIndex = 1;
+                    } else {
+                        playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT);
+                        if (player != null) {
+                            player.setVideoScalingMode(C.VIDEO_SCALING_MODE_SCALE_TO_FIT);
+                        }
+                        btnZoom.setText("FIT");
+                        resizeModeIndex = 0;
+                    }
+                }
+            });
+            setupDynamicControllerPanel();
+            setupSwipeGestures();
+        }
+
+        Intent intent = getIntent();
+        ChannelItem channel = null;
+
+        if (intent != null) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                channel = intent.getSerializableExtra("channel_data", ChannelItem.class);
+            } else {
+                channel = (ChannelItem) intent.getSerializableExtra("channel_data");
+            }
+        }
+
+        if (channel != null) {
+            handleIntentWithChannel(channel);
+        } else {
+            String rawUrl = getStreamUrlFromIntent();
+            if (rawUrl != null && !rawUrl.trim().isEmpty()) {
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                toggleFullscreenAndOrientation(true);
+                if (playerView != null) {
+                    playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FILL);
+                }
+                if (btnZoom != null) {
+                    btnZoom.setText("FILL");
+                }
+                resizeModeIndex = 1;
+                prepareAndPlay(rawUrl, false);
+            }
+        }
+    }
+
+    private void clearApplicationCache() {
+        try {
+            File cacheDir = getCacheDir();
+            if (cacheDir != null && cacheDir.isDirectory()) {
+                deleteDir(cacheDir);
+            }
+            File externalCacheDir = getExternalCacheDir();
+            if (externalCacheDir != null && externalCacheDir.isDirectory()) {
+                deleteDir(externalCacheDir);
+            }
+        } catch (Exception e) {
+            Log.e("CacheSystem", "Clear execution failed: " + e.getLocalizedMessage());
+        }
+    }
+
+    private boolean deleteDir(File dir) {
+        if (dir != null && dir.isDirectory()) {
+            String[] children = dir.list();
+            if (children != null) {
+                for (String child : children) {
+                    boolean success = deleteDir(new File(dir, child));
+                    if (!success) {
+                        return false;
+                    }
+                }
+            }
+            return dir.delete();
+        } else if (dir != null && dir.isFile()) {
+            return dir.delete();
+        } else {
+            return false;
+        }
+    }
+
+    @Override
+    public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, @NonNull android.content.res.Configuration newConfig) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
+        if (!isInPictureInPictureMode) {
+            if (!getLifecycle().getCurrentState().isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+                if (player != null) {
+                    player.release();
+                    player = null;
+                }
+                finishAffinity();
+                System.exit(0);
+            }
+        }
+    }
+
+    private void hideSystemUI() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(false);
+            WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller != null) {
+                controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            getWindow().getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            );
+        }
+    }
+
+    private void handleIntentWithChannel(ChannelItem channel) {
+        if (channel != null && channel.getStreamUrl() != null) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+            toggleFullscreenAndOrientation(true);
+
+            if (playerView != null) {
+                playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FILL);
+            }
+            if (btnZoom != null) {
+                btnZoom.setText("FILL");
+            }
+            resizeModeIndex = 1;
+
+            prepareAndPlay(channel.getStreamUrl(), false);
+        }
+    }
+
+    private String getStreamUrlFromIntent() {
+        String rawUrl = null;
+        Intent intent = getIntent();
+
+        if (intent != null) {
+            if (intent.hasExtra("stream_url")) {
+                rawUrl = intent.getStringExtra("stream_url");
+            } else if (intent.hasExtra("STREAM_URL")) {
+                rawUrl = intent.getStringExtra("STREAM_URL");
+            } else if (intent.hasExtra("url")) {
+                rawUrl = intent.getStringExtra("url");
+            } else if (intent.hasExtra("URL")) {
+                rawUrl = intent.getStringExtra("URL");
+            }
+
+            if (rawUrl == null && Intent.ACTION_SEND.equals(intent.getAction()) && "text/plain".equals(intent.getType())) {
+                rawUrl = intent.getStringExtra(Intent.EXTRA_TEXT);
+            }
+
+            if (rawUrl == null && intent.getData() != null) {
+                Uri data = intent.getData();
+                rawUrl = data.getQueryParameter("url");
+                if (rawUrl == null || rawUrl.trim().isEmpty()) {
+                    rawUrl = data.toString();
+                }
+            }
+        }
+
+        if (rawUrl == null || rawUrl.trim().isEmpty()) {
+            rawUrl = "";
+        }
+
+        return rawUrl;
+    }
+
+    // =========================================================================
+    // 🎮 ULTRA-PREMIUM PRO DTH PLAYER CONTROLLER LAYOUT
+    // =========================================================================
+    private void setupDynamicControllerPanel() {
+        playerView.post(() -> {
+            try {
+                android.content.Context context = playerView.getContext();
+                playerView.setControllerShowTimeoutMs(0);
+
+                ViewGroup exoControllerRoot = playerView.findViewById(androidx.media3.ui.R.id.exo_controller);
+
+                for (int i = playerView.getChildCount() - 1; i >= 0; i--) {
+                    View child = playerView.getChildAt(i);
+                    if (child != null && child.getTag() != null && ("custom_top_bar".equals(child.getTag())
+                            || "custom_side_nav".equals(child.getTag())
+                            || "floating_lock_overlay".equals(child.getTag()))) {
+                        playerView.removeViewAt(i);
+                    }
+                }
+
+                int sizeInPx = (int) (26 * getResources().getDisplayMetrics().density);
+                int btnTouchSize = (int) (38 * getResources().getDisplayMetrics().density);
+                int uniformMargin = (int) (25 * getResources().getDisplayMetrics().density);
+                int paddingInPx = (int) (6 * getResources().getDisplayMetrics().density);
+                int screenPadding = (int) (14 * getResources().getDisplayMetrics().density);
+                int topPadding = (int) (15 * getResources().getDisplayMetrics().density);
+                int customRightMargin = (int) (45 * getResources().getDisplayMetrics().density);
+
+                int[] attrs = new int[]{android.R.attr.selectableItemBackgroundBorderless};
+                android.content.res.TypedArray ta = obtainStyledAttributes(attrs);
+                android.graphics.drawable.Drawable rippleDrawable = ta.getDrawable(0);
+                ta.recycle();
+
+                View defaultCcBtn = playerView.findViewById(androidx.media3.ui.R.id.exo_subtitle);
+                View defaultGearBtn = playerView.findViewById(androidx.media3.ui.R.id.exo_settings);
+                View defaultFullscreenBtn = playerView.findViewById(androidx.media3.ui.R.id.exo_fullscreen);
+
+                // 🔝 1. TOP BAR CONTAINER
+                topBarLayout = new LinearLayout(context);
+                topBarLayout.setTag("custom_top_bar");
+                topBarLayout.setVisibility(View.GONE);
+                FrameLayout.LayoutParams topLp = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                topLp.gravity = Gravity.TOP;
+                topBarLayout.setLayoutParams(topLp);
+                topBarLayout.setOrientation(LinearLayout.HORIZONTAL);
+                topBarLayout.setGravity(Gravity.CENTER_VERTICAL);
+                topBarLayout.setPadding(screenPadding, topPadding, screenPadding, 0);
+
+                LinearLayout topLeftBox = new LinearLayout(context);
+                topLeftBox.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+                topLeftBox.setOrientation(LinearLayout.HORIZONTAL);
+                topLeftBox.setGravity(Gravity.CENTER_VERTICAL);
+
+                ImageView btnBack = new ImageView(context);
+                btnBack.setLayoutParams(new LinearLayout.LayoutParams(btnTouchSize, btnTouchSize));
+                btnBack.setImageResource(R.drawable.ic_back_custom);
+                btnBack.setPadding(paddingInPx, paddingInPx, paddingInPx, paddingInPx);
+                btnBack.setFocusable(true);
+                btnBack.setClickable(true);
+                if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                    btnBack.setBackground(rippleDrawable.getConstantState().newDrawable());
+                }
+                btnBack.setOnClickListener(v -> onBackPressed());
+                btnBack.setOnFocusChangeListener((v, hasFocus) -> {
+                    resetAutoHideTimer();
+                    if (hasFocus) {
+                        btnBack.setBackground(getTVFocusDrawable());
+                        btnBack.setColorFilter(Color.parseColor("#FFFFFF"), PorterDuff.Mode.SRC_IN);
+                    } else {
+                        if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                            btnBack.setBackground(rippleDrawable.getConstantState().newDrawable());
+                        }
+                        btnBack.clearColorFilter();
+                    }
+                });
+                topLeftBox.addView(btnBack);
+
+                tvChannelTitle = new TextView(context);
+                LinearLayout.LayoutParams lpTitle = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                lpTitle.leftMargin = (int) (8 * getResources().getDisplayMetrics().density);
+                tvChannelTitle.setLayoutParams(lpTitle);
+                tvChannelTitle.setText("Stream");
+                tvChannelTitle.setTextColor(Color.WHITE);
+                tvChannelTitle.setTextSize(15);
+                tvChannelTitle.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+                tvChannelTitle.setShadowLayer(8f, 0, 0, Color.BLACK);
+                topLeftBox.addView(tvChannelTitle);
+                topBarLayout.addView(topLeftBox);
+
+                // --- TOP RIGHT ACTIONS ---
+                LinearLayout topRightBox = new LinearLayout(context);
+                topRightBox.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                topRightBox.setOrientation(LinearLayout.HORIZONTAL);
+                topRightBox.setGravity(Gravity.CENTER_VERTICAL);
+
+                btnMute = new ImageView(context);
+                LinearLayout.LayoutParams lpMute = new LinearLayout.LayoutParams(btnTouchSize, btnTouchSize);
+                lpMute.rightMargin = customRightMargin;
+                btnMute.setLayoutParams(lpMute);
+                btnMute.setImageResource(R.drawable.ic_mute_custom);
+                btnMute.setPadding(paddingInPx, paddingInPx, paddingInPx, paddingInPx);
+                btnMute.setFocusable(true);
+                btnMute.setClickable(true);
+                if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                    btnMute.setBackground(rippleDrawable.getConstantState().newDrawable());
+                }
+                btnMute.setOnClickListener(v -> {
+                    resetAutoHideTimer();
+                    toggleMuteAction();
+                });
+                btnMute.setOnFocusChangeListener((v, hasFocus) -> {
+                    resetAutoHideTimer();
+                    if (hasFocus) {
+                        btnMute.setBackground(getTVFocusDrawable());
+                        btnMute.setColorFilter(Color.parseColor("#FFFFFF"), PorterDuff.Mode.SRC_IN);
+                    } else {
+                        if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                            btnMute.setBackground(rippleDrawable.getConstantState().newDrawable());
+                        }
+                        btnMute.clearColorFilter();
+                    }
+                });
+                topRightBox.addView(btnMute);
+
+                // ℹ️ NEW DTH INFO BUTTON
+                ImageView btnInfoCustom = new ImageView(context);
+                LinearLayout.LayoutParams lpInfo = new LinearLayout.LayoutParams(btnTouchSize, btnTouchSize);
+                lpInfo.rightMargin = customRightMargin;
+                btnInfoCustom.setLayoutParams(lpInfo);
+                btnInfoCustom.setImageResource(R.drawable.ic_info_btn);
+                btnInfoCustom.setPadding(paddingInPx, paddingInPx, paddingInPx, paddingInPx);
+                btnInfoCustom.setFocusable(true);
+                btnInfoCustom.setClickable(true);
+                if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                    btnInfoCustom.setBackground(rippleDrawable.getConstantState().newDrawable());
+                }
+                btnInfoCustom.setOnClickListener(v -> {
+                    resetAutoHideTimer();
+                    if (LiveTvActivity.staticChannelList != null && LiveTvActivity.staticCurrentIndex >= 0 && LiveTvActivity.staticCurrentIndex < LiveTvActivity.staticChannelList.size()) {
+                        ChannelItem currentCh = LiveTvActivity.staticChannelList.get(LiveTvActivity.staticCurrentIndex);
+                        showDthInfoOverlay(currentCh, LiveTvActivity.staticCurrentIndex);
+                    } else {
+                        Toast.makeText(context, "Channel info not available", Toast.LENGTH_SHORT).show();
+                    }
+                });
+                btnInfoCustom.setOnFocusChangeListener((v, hasFocus) -> {
+                    resetAutoHideTimer();
+                    if (hasFocus) {
+                        btnInfoCustom.setBackground(getTVFocusDrawable());
+                        btnInfoCustom.setColorFilter(Color.parseColor("#FFFFFF"), PorterDuff.Mode.SRC_IN);
+                    } else {
+                        if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                            btnInfoCustom.setBackground(rippleDrawable.getConstantState().newDrawable());
+                        }
+                        btnInfoCustom.clearColorFilter();
+                    }
+                });
+                topRightBox.addView(btnInfoCustom);
+
+                ImageView btnPip = new ImageView(context);
+                LinearLayout.LayoutParams lpPip = new LinearLayout.LayoutParams(btnTouchSize, btnTouchSize);
+                lpPip.rightMargin = customRightMargin;
+                btnPip.setLayoutParams(lpPip);
+                btnPip.setImageResource(R.drawable.ic_pip_custom);
+                btnPip.setPadding(paddingInPx, paddingInPx, paddingInPx, paddingInPx);
+                btnPip.setFocusable(true);
+                btnPip.setClickable(true);
+                if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                    btnPip.setBackground(rippleDrawable.getConstantState().newDrawable());
+                }
+                btnPip.setOnClickListener(v -> {
+                    resetAutoHideTimer();
+                    triggerPipTransitionMode();
+                });
+                btnPip.setOnFocusChangeListener((v, hasFocus) -> {
+                    resetAutoHideTimer();
+                    if (hasFocus) {
+                        btnPip.setBackground(getTVFocusDrawable());
+                        btnPip.setColorFilter(Color.parseColor("#FFFFFF"), PorterDuff.Mode.SRC_IN);
+                    } else {
+                        if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                            btnPip.setBackground(rippleDrawable.getConstantState().newDrawable());
+                        }
+                        btnPip.clearColorFilter();
+                    }
+                });
+                topRightBox.addView(btnPip);
+
+                btnLockScreen = new ImageView(context);
+                LinearLayout.LayoutParams lpLock = new LinearLayout.LayoutParams(btnTouchSize, btnTouchSize);
+                lpLock.rightMargin = (int) (10 * getResources().getDisplayMetrics().density);
+                btnLockScreen.setLayoutParams(lpLock);
+                btnLockScreen.setImageResource(R.drawable.ic_lock_custom);
+                btnLockScreen.setPadding(paddingInPx, paddingInPx, paddingInPx, paddingInPx);
+                btnLockScreen.setFocusable(true);
+                btnLockScreen.setClickable(true);
+                if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                    btnLockScreen.setBackground(rippleDrawable.getConstantState().newDrawable());
+                }
+
+                btnLockScreen.setOnClickListener(v -> {
+                    isScreenLocked = true;
+                    autoHideHandler.removeCallbacks(autoHideRunnable);
+                    hideAllCustomControls();
+                    if (playerView != null) {
+                        playerView.setUseController(false);
+                    }
+                    lockOverlay.setVisibility(View.VISIBLE);
+                    btnUnlockFloating.postDelayed(() -> btnUnlockFloating.requestFocus(), 50);
+                    Toast.makeText(context, "Controls Locked", Toast.LENGTH_SHORT).show();
+                });
+
+                btnLockScreen.setOnFocusChangeListener((v, hasFocus) -> {
+                    resetAutoHideTimer();
+                    if (hasFocus) {
+                        btnLockScreen.setBackground(getTVFocusDrawable());
+                        btnLockScreen.setColorFilter(Color.parseColor("#FFFFFF"), PorterDuff.Mode.SRC_IN);
+                    } else {
+                        if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                            btnLockScreen.setBackground(rippleDrawable.getConstantState().newDrawable());
+                        }
+                        btnLockScreen.clearColorFilter();
+                    }
+                });
+                topRightBox.addView(btnLockScreen);
+                topBarLayout.addView(topRightBox);
+
+                // Floating Lock Overlay
+                lockOverlay = new FrameLayout(context);
+                lockOverlay.setLayoutParams(new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                int safePadding25 = (int) (25 * getResources().getDisplayMetrics().density);
+                lockOverlay.setPadding(safePadding25, safePadding25, 0, 0);
+                lockOverlay.setVisibility(View.GONE);
+                lockOverlay.setClickable(true);
+                lockOverlay.setFocusable(false);
+
+                btnUnlockFloating = new ImageView(context);
+                FrameLayout.LayoutParams flParams = new FrameLayout.LayoutParams(btnTouchSize, btnTouchSize);
+                flParams.gravity = Gravity.TOP | Gravity.START;
+                btnUnlockFloating.setLayoutParams(flParams);
+                btnUnlockFloating.setImageResource(R.drawable.ic_unlock_custom);
+                btnUnlockFloating.setPadding(paddingInPx, paddingInPx, paddingInPx, paddingInPx);
+                btnUnlockFloating.setFocusable(true);
+                btnUnlockFloating.setClickable(true);
+                if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                    btnUnlockFloating.setBackground(rippleDrawable.getConstantState().newDrawable());
+                }
+                btnUnlockFloating.setOnFocusChangeListener((v, hasFocus) -> {
+                    if (hasFocus) {
+                        btnUnlockFloating.setBackground(getTVUnlockFocusDrawable());
+                        btnUnlockFloating.clearColorFilter();
+                    } else {
+                        if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                            btnUnlockFloating.setBackground(rippleDrawable.getConstantState().newDrawable());
+                        }
+                        btnUnlockFloating.clearColorFilter();
+                    }
+                });
+
+                btnUnlockFloating.setOnClickListener(v -> {
+                    isScreenLocked = false;
+                    lockOverlay.setVisibility(View.GONE);
+                    if (playerView != null) {
+                        playerView.setUseController(true);
+                    }
+                    showAllCustomControls();
+                    if (btnLockScreen != null) {
+                        btnLockScreen.requestFocus();
+                    }
+                    Toast.makeText(context, "Controls Unlocked", Toast.LENGTH_SHORT).show();
+                });
+                lockOverlay.addView(btnUnlockFloating);
+
+                // ◀️ ▶️ 2. CENTER-LEFT & CENTER-RIGHT CHANNEL SWITCH BUTTONS
+                sideNavContainer = new FrameLayout(context);
+                sideNavContainer.setTag("custom_side_nav");
+                sideNavContainer.setVisibility(View.GONE);
+                sideNavContainer.setLayoutParams(new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                int sideBtnSize = (int) (52 * getResources().getDisplayMetrics().density);
+
+                ImageView btnPrevChannel = new ImageView(context);
+                FrameLayout.LayoutParams lpPrev = new FrameLayout.LayoutParams(sideBtnSize, sideBtnSize);
+                lpPrev.gravity = Gravity.CENTER_VERTICAL | Gravity.START;
+                lpPrev.leftMargin = screenPadding;
+                btnPrevChannel.setLayoutParams(lpPrev);
+                btnPrevChannel.setImageResource(androidx.media3.ui.R.drawable.exo_styled_controls_previous);
+                btnPrevChannel.setPadding(paddingInPx + 4, paddingInPx + 4, paddingInPx + 4, paddingInPx + 4);
+                btnPrevChannel.setFocusable(true);
+                btnPrevChannel.setClickable(true);
+                if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                    btnPrevChannel.setBackground(rippleDrawable.getConstantState().newDrawable());
+                }
+                btnPrevChannel.setOnClickListener(v -> {
+                    resetAutoHideTimer();
+                    playPreviousChannel();
+                });
+                btnPrevChannel.setOnFocusChangeListener((v, hasFocus) -> {
+                    resetAutoHideTimer();
+                    if (hasFocus) {
+                        btnPrevChannel.setBackground(getTVFocusDrawable());
+                        btnPrevChannel.setColorFilter(Color.parseColor("#FFFFFF"), PorterDuff.Mode.SRC_IN);
+                    } else {
+                        if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                            btnPrevChannel.setBackground(rippleDrawable.getConstantState().newDrawable());
+                        }
+                        btnPrevChannel.clearColorFilter();
+                    }
+                });
+                sideNavContainer.addView(btnPrevChannel);
+
+                ImageView btnNextChannel = new ImageView(context);
+                FrameLayout.LayoutParams lpNext = new FrameLayout.LayoutParams(sideBtnSize, sideBtnSize);
+                lpNext.gravity = Gravity.CENTER_VERTICAL | Gravity.END;
+                lpNext.rightMargin = screenPadding;
+                btnNextChannel.setLayoutParams(lpNext);
+                btnNextChannel.setImageResource(androidx.media3.ui.R.drawable.exo_styled_controls_next);
+                btnNextChannel.setPadding(paddingInPx + 4, paddingInPx + 4, paddingInPx + 4, paddingInPx + 4);
+                btnNextChannel.setFocusable(true);
+                btnNextChannel.setClickable(true);
+                if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                    btnNextChannel.setBackground(rippleDrawable.getConstantState().newDrawable());
+                }
+                btnNextChannel.setOnClickListener(v -> {
+                    resetAutoHideTimer();
+                    playNextChannel();
+                });
+                btnNextChannel.setOnFocusChangeListener((v, hasFocus) -> {
+                    resetAutoHideTimer();
+                    if (hasFocus) {
+                        btnNextChannel.setBackground(getTVFocusDrawable());
+                        btnNextChannel.setColorFilter(Color.parseColor("#FFFFFF"), PorterDuff.Mode.SRC_IN);
+                    } else {
+                        if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                            btnNextChannel.setBackground(rippleDrawable.getConstantState().newDrawable());
+                        }
+                        btnNextChannel.clearColorFilter();
+                    }
+                });
+                sideNavContainer.addView(btnNextChannel);
+
+                // 🔽 3. BOTTOM CONTROLS
+                View centerControls = playerView.findViewById(androidx.media3.ui.R.id.exo_basic_controls);
+                if (centerControls instanceof LinearLayout) {
+                    LinearLayout controlBar = (LinearLayout) centerControls;
+                    controlBar.removeAllViews();
+                    controlBar.setLayoutAnimation(null);
+
+                    if (defaultCcBtn != null) {
+                        LinearLayout.LayoutParams lpCc = new LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                        lpCc.gravity = Gravity.CENTER_VERTICAL;
+                        lpCc.leftMargin = uniformMargin;
+                        lpCc.rightMargin = uniformMargin;
+                        defaultCcBtn.setLayoutParams(lpCc);
+                        defaultCcBtn.setPadding(paddingInPx, paddingInPx, paddingInPx, paddingInPx);
+                        defaultCcBtn.setFocusable(true);
+                        defaultCcBtn.setClickable(true);
+                        if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                            defaultCcBtn.setBackground(rippleDrawable.getConstantState().newDrawable());
+                        }
+                        defaultCcBtn.setOnFocusChangeListener((v, hasFocus) -> {
+                            resetAutoHideTimer();
+                            if (hasFocus) {
+                                defaultCcBtn.setBackground(getTVFocusDrawable());
+                                if (defaultCcBtn instanceof ImageView) {
+                                    ((ImageView) defaultCcBtn).setColorFilter(Color.parseColor("#FFFFFF"), PorterDuff.Mode.SRC_IN);
+                                }
+                            } else {
+                                if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                                    defaultCcBtn.setBackground(rippleDrawable.getConstantState().newDrawable());
+                                }
+                                if (defaultCcBtn instanceof ImageView) {
+                                    ((ImageView) defaultCcBtn).clearColorFilter();
+                                }
+                            }
+                        });
+                        defaultCcBtn.setVisibility(View.VISIBLE);
+                        controlBar.addView(defaultCcBtn);
+                    }
+
+                    btnZoom = new TextView(context);
+                    LinearLayout.LayoutParams lpZoom = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    lpZoom.gravity = Gravity.CENTER_VERTICAL;
+                    lpZoom.leftMargin = uniformMargin;
+                    lpZoom.rightMargin = uniformMargin;
+                    btnZoom.setLayoutParams(lpZoom);
+                    btnZoom.setText("FILL");
+                    btnZoom.setTextColor(Color.WHITE);
+                    btnZoom.setTextSize(13);
+                    btnZoom.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+                    btnZoom.setPadding(paddingInPx, paddingInPx, paddingInPx, paddingInPx);
+                    btnZoom.setFocusable(true);
+                    btnZoom.setClickable(true);
+                    if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                        btnZoom.setBackground(rippleDrawable.getConstantState().newDrawable());
+                    }
+                    btnZoom.setOnClickListener(v -> {
+                        resetAutoHideTimer();
+                        toggleZoomModes();
+                    });
+                    btnZoom.setOnFocusChangeListener((v, hasFocus) -> {
+                        resetAutoHideTimer();
+                        if (hasFocus) {
+                            btnZoom.setBackground(getTVFocusDrawable());
+                            btnZoom.setTextColor(Color.parseColor("#FFFFFF"));
+                        } else {
+                            if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                                btnZoom.setBackground(rippleDrawable.getConstantState().newDrawable());
+                            }
+                            btnZoom.setTextColor(Color.WHITE);
+                        }
+                    });
+                    controlBar.addView(btnZoom);
+
+                    ImageView btnTrackSelect = new ImageView(context);
+                    LinearLayout.LayoutParams lpTrack = new LinearLayout.LayoutParams(sizeInPx + (paddingInPx * 2), sizeInPx + (paddingInPx * 2));
+                    lpTrack.gravity = Gravity.CENTER_VERTICAL;
+                    lpTrack.leftMargin = uniformMargin;
+                    lpTrack.rightMargin = uniformMargin;
+                    btnTrackSelect.setLayoutParams(lpTrack);
+                    btnTrackSelect.setImageResource(R.drawable.ic_quality_custom);
+                    btnTrackSelect.setPadding(paddingInPx, paddingInPx, paddingInPx, paddingInPx);
+                    btnTrackSelect.setFocusable(true);
+                    btnTrackSelect.setClickable(true);
+                    if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                        btnTrackSelect.setBackground(rippleDrawable.getConstantState().newDrawable());
+                    }
+                    btnTrackSelect.setOnClickListener(v -> {
+                        resetAutoHideTimer();
+                        launchOfficialMultiTabTracksDialog();
+                    });
+                    btnTrackSelect.setOnFocusChangeListener((v, hasFocus) -> {
+                        resetAutoHideTimer();
+                        if (hasFocus) {
+                            btnTrackSelect.setBackground(getTVFocusDrawable());
+                            btnTrackSelect.setColorFilter(Color.parseColor("#FFFFFF"), PorterDuff.Mode.SRC_IN);
+                        } else {
+                            if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                                btnTrackSelect.setBackground(rippleDrawable.getConstantState().newDrawable());
+                            }
+                            btnTrackSelect.clearColorFilter();
+                        }
+                    });
+                    controlBar.addView(btnTrackSelect);
+
+                    // --- 📺 CHANNEL LIST / MENU BUTTON ---
+                    ImageView btnCustomBottom = new ImageView(context);
+                    LinearLayout.LayoutParams lpCustomBottom = new LinearLayout.LayoutParams(sizeInPx + (paddingInPx * 2), sizeInPx + (paddingInPx * 2));
+                    lpCustomBottom.gravity = Gravity.CENTER_VERTICAL;
+                    lpCustomBottom.leftMargin = uniformMargin;
+                    lpCustomBottom.rightMargin = uniformMargin;
+                    btnCustomBottom.setLayoutParams(lpCustomBottom);
+                    btnCustomBottom.setImageResource(R.drawable.ic_custom_action);
+                    btnCustomBottom.setPadding(paddingInPx, paddingInPx, paddingInPx, paddingInPx);
+                    btnCustomBottom.setFocusable(true);
+                    btnCustomBottom.setClickable(true);
+                    if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                        btnCustomBottom.setBackground(rippleDrawable.getConstantState().newDrawable());
+                    }
+                    btnCustomBottom.setOnClickListener(v -> {
+                        resetAutoHideTimer();
+                        toggleQuickMenu();
+                    });
+                    btnCustomBottom.setOnFocusChangeListener((v, hasFocus) -> {
+                        resetAutoHideTimer();
+                        if (hasFocus) {
+                            btnCustomBottom.setBackground(getTVFocusDrawable());
+                            btnCustomBottom.setColorFilter(Color.parseColor("#FFFFFF"), PorterDuff.Mode.SRC_IN);
+                        } else {
+                            if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                                btnCustomBottom.setBackground(rippleDrawable.getConstantState().newDrawable());
+                            }
+                            btnCustomBottom.clearColorFilter();
+                        }
+                    });
+                    controlBar.addView(btnCustomBottom);
+
+                    if (defaultGearBtn != null) {
+                        LinearLayout.LayoutParams lpGear = new LinearLayout.LayoutParams(sizeInPx + (paddingInPx * 2), sizeInPx + (paddingInPx * 2));
+                        lpGear.gravity = Gravity.CENTER_VERTICAL;
+                        lpGear.leftMargin = uniformMargin;
+                        lpGear.rightMargin = uniformMargin;
+                        defaultGearBtn.setLayoutParams(lpGear);
+                        defaultGearBtn.setPadding(paddingInPx, paddingInPx, paddingInPx, paddingInPx);
+                        defaultGearBtn.setFocusable(true);
+                        defaultGearBtn.setClickable(true);
+                        if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                            defaultGearBtn.setBackground(rippleDrawable.getConstantState().newDrawable());
+                        }
+                        defaultGearBtn.setOnFocusChangeListener((v, hasFocus) -> {
+                            resetAutoHideTimer();
+                            if (hasFocus) {
+                                defaultGearBtn.setBackground(getTVFocusDrawable());
+                                if (defaultGearBtn instanceof ImageView) {
+                                    ((ImageView) defaultGearBtn).setColorFilter(Color.parseColor("#FFFFFF"), PorterDuff.Mode.SRC_IN);
+                                }
+                            } else {
+                                if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                                    defaultGearBtn.setBackground(rippleDrawable.getConstantState().newDrawable());
+                                }
+                                if (defaultGearBtn instanceof ImageView) {
+                                    ((ImageView) defaultGearBtn).clearColorFilter();
+                                }
+                            }
+                        });
+                        defaultGearBtn.setVisibility(View.VISIBLE);
+                        controlBar.addView(defaultGearBtn);
+                    }
+
+                    if (defaultFullscreenBtn != null) {
+                        LinearLayout.LayoutParams lpFs = new LinearLayout.LayoutParams(sizeInPx + (paddingInPx * 2), sizeInPx + (paddingInPx * 2));
+                        lpFs.gravity = Gravity.CENTER_VERTICAL;
+                        lpFs.leftMargin = uniformMargin;
+                        lpFs.rightMargin = uniformMargin;
+                        defaultFullscreenBtn.setLayoutParams(lpFs);
+                        defaultFullscreenBtn.setPadding(paddingInPx, paddingInPx, paddingInPx, paddingInPx);
+                        defaultFullscreenBtn.setFocusable(true);
+                        defaultFullscreenBtn.setClickable(true);
+                        if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                            defaultFullscreenBtn.setBackground(rippleDrawable.getConstantState().newDrawable());
+                        }
+                        defaultFullscreenBtn.setOnFocusChangeListener((v, hasFocus) -> {
+                            resetAutoHideTimer();
+                            if (hasFocus) {
+                                defaultFullscreenBtn.setBackground(getTVFocusDrawable());
+                                if (defaultFullscreenBtn instanceof ImageView) {
+                                    ((ImageView) defaultFullscreenBtn).setColorFilter(Color.parseColor("#FFFFFF"), PorterDuff.Mode.SRC_IN);
+                                }
+                            } else {
+                                if (rippleDrawable != null && rippleDrawable.getConstantState() != null) {
+                                    defaultFullscreenBtn.setBackground(rippleDrawable.getConstantState().newDrawable());
+                                }
+                                if (defaultFullscreenBtn instanceof ImageView) {
+                                    ((ImageView) defaultFullscreenBtn).clearColorFilter();
+                                }
+                            }
+                        });
+                        defaultFullscreenBtn.setVisibility(View.VISIBLE);
+                        controlBar.addView(defaultFullscreenBtn);
+                    }
+                }
+
+                playerView.addView(sideNavContainer);
+                playerView.addView(topBarLayout);
+                lockOverlay.setTag("floating_lock_overlay");
+                playerView.addView(lockOverlay);
+
+                playerView.setOnClickListener(v -> {
+                    if (isScreenLocked) return;
+                    if (topBarLayout.getVisibility() == View.VISIBLE) {
+                        hideAllCustomControls();
+                    } else {
+                        showAllCustomControls();
+                    }
+                });
+
+                resetAutoHideTimer();
+
+            } catch (Exception e) {
+                Log.e("ControllerPanelError", "Sequence mapping trace failed: " + e.getLocalizedMessage());
+            }
+        });
+    }
+
+    private void showAllCustomControls() {
+        if (isScreenLocked) return;
+        autoHideHandler.removeCallbacks(autoHideRunnable);
+
+        if (playerView != null) {
+            playerView.showController();
+        }
+        if (topBarLayout != null) {
+            topBarLayout.setVisibility(View.VISIBLE);
+        }
+        if (sideNavContainer != null) {
+            sideNavContainer.setVisibility(View.VISIBLE);
+        }
+
+        if (btnZoom != null) {
+            btnZoom.postDelayed(() -> btnZoom.requestFocus(), 50);
+        }
+
+        resetAutoHideTimer();
+    }
+
+    private void hideAllCustomControls() {
+        autoHideHandler.removeCallbacks(autoHideRunnable);
+        if (playerView != null) {
+            playerView.hideController();
+        }
+        if (topBarLayout != null) {
+            topBarLayout.setVisibility(View.GONE);
+        }
+        if (sideNavContainer != null) {
+            sideNavContainer.setVisibility(View.GONE);
+        }
+    }
+
+    private void resetAutoHideTimer() {
+        autoHideHandler.removeCallbacks(autoHideRunnable);
+        if (!isScreenLocked) {
+            autoHideHandler.postDelayed(autoHideRunnable, 3500);
+        }
+    }
+
+    private void playNextChannel() {
+        if (isScreenLocked) return;
+        if (playerView != null) {
+            playerView.hideController();
+        }
+
+        if (LiveTvActivity.staticChannelList != null && !LiveTvActivity.staticChannelList.isEmpty()) {
+            LiveTvActivity.staticCurrentIndex++;
+            if (LiveTvActivity.staticCurrentIndex >= LiveTvActivity.staticChannelList.size()) {
+                LiveTvActivity.staticCurrentIndex = 0;
+            }
+            ChannelItem nextChannel = LiveTvActivity.staticChannelList.get(LiveTvActivity.staticCurrentIndex);
+            if (nextChannel != null && nextChannel.getStreamUrl() != null) {
+                prepareAndPlay(nextChannel.getStreamUrl(), false);
+                showDthInfoOverlay(nextChannel, LiveTvActivity.staticCurrentIndex);
+            }
+        }
+    }
+
+    private void playPreviousChannel() {
+        if (isScreenLocked) return;
+        if (playerView != null) {
+            playerView.hideController();
+        }
+
+        if (LiveTvActivity.staticChannelList != null && !LiveTvActivity.staticChannelList.isEmpty()) {
+            LiveTvActivity.staticCurrentIndex--;
+            if (LiveTvActivity.staticCurrentIndex < 0) {
+                LiveTvActivity.staticCurrentIndex = LiveTvActivity.staticChannelList.size() - 1;
+            }
+            ChannelItem prevChannel = LiveTvActivity.staticChannelList.get(LiveTvActivity.staticCurrentIndex);
+            if (prevChannel != null && prevChannel.getStreamUrl() != null) {
+                prepareAndPlay(prevChannel.getStreamUrl(), false);
+                showDthInfoOverlay(prevChannel, LiveTvActivity.staticCurrentIndex);
+            }
+        }
+    }
+
+    private void toggleZoomModes() {
+        if (playerView == null || btnZoom == null || player == null) return;
+
+        resizeModeIndex = (resizeModeIndex + 1) % 3;
+
+        switch (resizeModeIndex) {
+            case 0:
+                playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT);
+                player.setVideoScalingMode(C.VIDEO_SCALING_MODE_SCALE_TO_FIT);
+                btnZoom.setText("FIT");
+                break;
+
+            case 1:
+                playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FILL);
+                player.setVideoScalingMode(C.VIDEO_SCALING_MODE_SCALE_TO_FIT);
+                btnZoom.setText("FILL");
+                break;
+
+            case 2:
+                playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_ZOOM);
+                player.setVideoScalingMode(C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING);
+                btnZoom.setText("ZOOM");
+                break;
+        }
+
+        try {
+            playerView.requestLayout();
+            View surfaceView = playerView.getVideoSurfaceView();
+            if (surfaceView != null) {
+                surfaceView.requestLayout();
+            }
+        } catch (Exception e) {
+            Log.e("TV_Scale_Error", "Surface layout bypass failed: " + e.getLocalizedMessage());
+        }
+    }
+
+    private void triggerPipTransitionMode() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                PictureInPictureParams.Builder pipBuilder = new PictureInPictureParams.Builder();
+                pipBuilder.setAspectRatio(new Rational(16, 9));
+                enterPictureInPictureMode(pipBuilder.build());
+            } catch (Exception e) {
+                Toast.makeText(this, "PiP context mapping missed", Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
+    private void launchOfficialMultiTabTracksDialog() {
+        if (player == null || isScreenLocked) return;
+        Tracks currentTracks = player.getCurrentTracks();
+
+        List<String> videoOptions = new ArrayList<>();
+        List<TrackSelectionOverride> videoOverrides = new ArrayList<>();
+        videoOptions.add("Auto (Adaptive Video)");
+        List<String> audioOptions = new ArrayList<>();
+        List<TrackSelectionOverride> audioOverrides = new ArrayList<>();
+        audioOptions.add("Auto (Default Audio)");
+        for (Tracks.Group group : currentTracks.getGroups()) {
+            TrackGroup mediaTrackGroup = group.getMediaTrackGroup();
+            if (group.getType() == C.TRACK_TYPE_VIDEO) {
+                for (int i = 0; i < mediaTrackGroup.length; i++) {
+                    if (group.isTrackSupported(i)) {
+                        androidx.media3.common.Format format = mediaTrackGroup.getFormat(i);
+                        String label = format.height + "p (" + (format.bitrate / 1000) + " kbps)";
+                        videoOptions.add(label);
+                        videoOverrides.add(new TrackSelectionOverride(mediaTrackGroup, i));
+                    }
+                }
+            } else if (group.getType() == C.TRACK_TYPE_AUDIO) {
+                for (int i = 0; i < mediaTrackGroup.length; i++) {
+                    if (group.isTrackSupported(i)) {
+                        androidx.media3.common.Format format = mediaTrackGroup.getFormat(i);
+                        String langName = "Unknown Language";
+                        if (format.language != null) {
+                            java.util.Locale locale = new java.util.Locale(format.language);
+                            langName = locale.getDisplayLanguage().toUpperCase();
+                        }
+                        String bitrateDetails = "";
+                        if (format.bitrate > 0) {
+                            if (format.bitrate >= 1000000) {
+                                double mbps = (double) format.bitrate / 1000000.0;
+                                bitrateDetails = String.format(java.util.Locale.US, ", %.2f Mbps", mbps);
+                            } else {
+                                int kbps = format.bitrate / 1000;
+                                bitrateDetails = ", " + kbps + " kbps";
+                            }
+                        }
+                        String channels = format.channelCount == 2 ?
+                                " Stereo" : (format.channelCount > 2 ? " Surround" : "");
+                        audioOptions.add(langName + channels + bitrateDetails);
+                        audioOverrides.add(new TrackSelectionOverride(mediaTrackGroup, i));
+                    }
+                }
+            }
+        }
+
+        // 👈 Poore dialog ko ScrollView me wrap kiya hai taaki choti screen par cut na ho
+        android.widget.ScrollView scrollView = new android.widget.ScrollView(this);
+        scrollView.setLayoutParams(new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        scrollView.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        scrollView.setVerticalScrollBarEnabled(false);
+
+        LinearLayout mainLayout = new LinearLayout(this);
+        mainLayout.setOrientation(LinearLayout.VERTICAL);
+        mainLayout.setPadding(50, 50, 50, 40);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            mainLayout.setClipToOutline(true);
+            android.graphics.drawable.GradientDrawable cardShape = new android.graphics.drawable.GradientDrawable();
+            cardShape.setColor(Color.parseColor("#1A1A1A"));
+            cardShape.setCornerRadius(35f);
+            mainLayout.setBackground(cardShape);
+        } else {
+            mainLayout.setBackgroundColor(Color.parseColor("#1A1A1A"));
+        }
+
+        TextView tvDialogTitle = new TextView(this);
+        tvDialogTitle.setText("Select Tracks Quality");
+        tvDialogTitle.setTextColor(Color.WHITE);
+        tvDialogTitle.setTextSize(20);
+        tvDialogTitle.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        tvDialogTitle.setPadding(10, 0, 0, 35);
+        mainLayout.addView(tvDialogTitle);
+
+        int[] attrs = new int[]{android.R.attr.selectableItemBackground};
+        android.content.res.TypedArray ta = obtainStyledAttributes(attrs);
+        android.graphics.drawable.Drawable rippleDrawable = ta.getDrawable(0);
+        ta.recycle();
+
+        LinearLayout tabsContainer = new LinearLayout(this);
+        tabsContainer.setOrientation(LinearLayout.HORIZONTAL);
+        tabsContainer.setWeightSum(2.0f);
+        tabsContainer.setPadding(0, 10, 0, 30);
+
+        LinearLayout.LayoutParams tabParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f);
+        TextView tabVideo = new TextView(this);
+        tabVideo.setText("VIDEO QUALITY");
+        tabVideo.setGravity(Gravity.CENTER);
+        tabVideo.setTextColor(Color.parseColor("#FFFFFF"));
+        tabVideo.setTextSize(15);
+        tabVideo.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        tabVideo.setPadding(0, 20, 0, 20);
+        tabVideo.setLayoutParams(tabParams);
+        tabVideo.setFocusable(true);
+        tabVideo.setClickable(true);
+        if (rippleDrawable != null)
+            tabVideo.setBackground(rippleDrawable.getConstantState().newDrawable());
+
+        TextView tabAudio = new TextView(this);
+        tabAudio.setText("AUDIO LANGUAGE");
+        tabAudio.setGravity(Gravity.CENTER);
+        tabAudio.setTextColor(Color.parseColor("#AAAAAA"));
+        tabAudio.setTextSize(15);
+        tabAudio.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        tabAudio.setPadding(0, 20, 0, 20);
+        tabAudio.setLayoutParams(tabParams);
+        tabAudio.setFocusable(true);
+        tabAudio.setClickable(true);
+        if (rippleDrawable != null)
+            tabAudio.setBackground(rippleDrawable.getConstantState().newDrawable());
+
+        tabsContainer.addView(tabVideo);
+        tabsContainer.addView(tabAudio);
+        mainLayout.addView(tabsContainer);
+
+        // 👈 Height ko adaptive rakhne ke liye wrap_content ya safe limit di hai
+        FrameLayout contentFrame = new FrameLayout(this);
+        contentFrame.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 480));
+
+        int listItemLayout = android.R.layout.simple_list_item_single_choice;
+
+        ListView lvVideo = new ListView(this);
+        ArrayAdapter<String> videoAdapter = new ArrayAdapter<String>(this, listItemLayout, videoOptions) {
+            @NonNull
+            @Override
+            public View getView(int pos, View convert, @NonNull ViewGroup p) {
+                View v = super.getView(pos, convert, p);
+                TextView txt = v.findViewById(android.R.id.text1);
+                txt.setTextColor(Color.WHITE);
+                txt.setTextSize(16);
+                v.setPadding(25, 25, 25, 25);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    v.setClipToOutline(true);
+                }
+
+                v.setOnFocusChangeListener((view, hasFocus) -> {
+                    if (hasFocus) {
+                        android.graphics.drawable.GradientDrawable itemFocusBg = new android.graphics.drawable.GradientDrawable();
+                        itemFocusBg.setColor(Color.parseColor("#33FFFFFF"));
+                        itemFocusBg.setCornerRadius(18f);
+                        view.setBackground(itemFocusBg);
+                        txt.setTextColor(Color.parseColor("#FFFFFF"));
+                    } else {
+                        view.setBackgroundColor(Color.TRANSPARENT);
+                        txt.setTextColor(Color.WHITE);
+                    }
+                });
+                return v;
+            }
+        };
+        lvVideo.setAdapter(videoAdapter);
+        lvVideo.setChoiceMode(ListView.CHOICE_MODE_SINGLE);
+        lvVideo.setItemChecked(player != null && !player.getTrackSelectionParameters().overrides.isEmpty() ? lvVideo.getCheckedItemPosition() : 0, true);
+
+        ListView lvAudio = new ListView(this);
+        ArrayAdapter<String> audioAdapter = new ArrayAdapter<String>(this, listItemLayout, audioOptions) {
+            @NonNull
+            @Override
+            public View getView(int pos, View convert, @NonNull ViewGroup p) {
+                View v = super.getView(pos, convert, p);
+                TextView txt = v.findViewById(android.R.id.text1);
+                txt.setTextColor(Color.WHITE);
+                txt.setTextSize(16);
+                v.setPadding(25, 25, 25, 25);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    v.setClipToOutline(true);
+                }
+
+                v.setOnFocusChangeListener((view, hasFocus) -> {
+                    if (hasFocus) {
+                        android.graphics.drawable.GradientDrawable itemFocusBg = new android.graphics.drawable.GradientDrawable();
+                        itemFocusBg.setColor(Color.parseColor("#33FFFFFF"));
+                        itemFocusBg.setCornerRadius(18f);
+                        view.setBackground(itemFocusBg);
+                        txt.setTextColor(Color.parseColor("#FFFFFF"));
+                    } else {
+                        view.setBackgroundColor(Color.TRANSPARENT);
+                        txt.setTextColor(Color.WHITE);
+                    }
+                });
+                return v;
+            }
+        };
+        lvAudio.setAdapter(audioAdapter);
+        lvAudio.setChoiceMode(ListView.CHOICE_MODE_SINGLE);
+        lvAudio.setItemChecked(0, true);
+        lvAudio.setVisibility(View.GONE);
+
+        contentFrame.addView(lvVideo);
+        contentFrame.addView(lvAudio);
+        mainLayout.addView(contentFrame);
+
+        final boolean[] isVideoTabActive = {true};
+        tabVideo.setOnClickListener(v -> {
+            isVideoTabActive[0] = true;
+            tabVideo.setTextColor(Color.parseColor("#FFFFFF"));
+            tabAudio.setTextColor(Color.parseColor("#AAAAAA"));
+            lvVideo.setVisibility(View.VISIBLE);
+            lvAudio.setVisibility(View.GONE);
+        });
+        tabVideo.setOnFocusChangeListener((v, hasFocus) -> {
+            if (hasFocus) {
+                android.graphics.drawable.GradientDrawable tabFocusBg = new android.graphics.drawable.GradientDrawable();
+                tabFocusBg.setColor(Color.parseColor("#22FFFFFF"));
+                tabFocusBg.setCornerRadius(15f);
+                tabVideo.setBackground(tabFocusBg);
+            } else {
+                tabVideo.setBackgroundColor(Color.TRANSPARENT);
+                tabVideo.setTextColor(isVideoTabActive[0] ? Color.parseColor("#FFFFFF") : Color.parseColor("#AAAAAA"));
+            }
+        });
+        tabAudio.setOnClickListener(v -> {
+            isVideoTabActive[0] = false;
+            tabAudio.setTextColor(Color.parseColor("#FFFFFF"));
+            tabVideo.setTextColor(Color.parseColor("#AAAAAA"));
+            lvAudio.setVisibility(View.VISIBLE);
+            lvVideo.setVisibility(View.GONE);
+        });
+        tabAudio.setOnFocusChangeListener((v, hasFocus) -> {
+            if (hasFocus) {
+                android.graphics.drawable.GradientDrawable tabFocusBg = new android.graphics.drawable.GradientDrawable();
+                tabFocusBg.setColor(Color.parseColor("#22FFFFFF"));
+                tabFocusBg.setCornerRadius(15f);
+                tabAudio.setBackground(tabFocusBg);
+            } else {
+                tabAudio.setBackgroundColor(Color.TRANSPARENT);
+                tabAudio.setTextColor(!isVideoTabActive[0] ? Color.parseColor("#FFFFFF") : Color.parseColor("#AAAAAA"));
+            }
+        });
+
+        LinearLayout actionsButtonBar = new LinearLayout(this);
+        actionsButtonBar.setOrientation(LinearLayout.HORIZONTAL);
+        actionsButtonBar.setGravity(Gravity.END);
+        actionsButtonBar.setPadding(0, 40, 10, 0);
+
+        TextView btnCancel = new TextView(this);
+        btnCancel.setText("CANCEL");
+        btnCancel.setTextColor(Color.parseColor("#CCCCCC"));
+        btnCancel.setTextSize(15);
+        btnCancel.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        btnCancel.setPadding(45, 25, 45, 25);
+        btnCancel.setFocusable(true);
+        btnCancel.setClickable(true);
+
+        android.graphics.drawable.GradientDrawable cancelDefaultShape = new android.graphics.drawable.GradientDrawable();
+        cancelDefaultShape.setColor(Color.TRANSPARENT);
+        cancelDefaultShape.setCornerRadius(40f);
+        btnCancel.setBackground(cancelDefaultShape);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            btnCancel.setClipToOutline(true);
+        }
+
+        btnCancel.setOnFocusChangeListener((v, hasFocus) -> {
+            android.graphics.drawable.GradientDrawable shape = new android.graphics.drawable.GradientDrawable();
+            shape.setCornerRadius(40f);
+            if (hasFocus) {
+                shape.setColor(Color.parseColor("#2754F5"));
+                btnCancel.setBackground(shape);
+                btnCancel.setTextColor(Color.WHITE);
+            } else {
+                shape.setColor(Color.TRANSPARENT);
+                btnCancel.setBackground(shape);
+                btnCancel.setTextColor(Color.parseColor("#CCCCCC"));
+            }
+        });
+
+        TextView btnOk = new TextView(this);
+        btnOk.setText("APPLY CHANGES");
+        btnOk.setTextColor(Color.parseColor("#FFFFFF"));
+        btnOk.setTextSize(15);
+        btnOk.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        btnOk.setPadding(45, 25, 45, 25);
+        btnOk.setFocusable(true);
+        btnOk.setClickable(true);
+        android.graphics.drawable.GradientDrawable okDefaultShape = new android.graphics.drawable.GradientDrawable();
+        okDefaultShape.setColor(Color.TRANSPARENT);
+        okDefaultShape.setCornerRadius(40f);
+        btnOk.setBackground(okDefaultShape);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            btnOk.setClipToOutline(true);
+        }
+
+        btnOk.setOnFocusChangeListener((v, hasFocus) -> {
+            android.graphics.drawable.GradientDrawable shape = new android.graphics.drawable.GradientDrawable();
+            shape.setCornerRadius(40f);
+            if (hasFocus) {
+                shape.setColor(Color.parseColor("#FFFFFF"));
+                btnOk.setBackground(shape);
+                btnOk.setTextColor(Color.BLACK);
+            } else {
+                shape.setColor(Color.TRANSPARENT);
+                btnOk.setBackground(shape);
+                btnOk.setTextColor(Color.parseColor("#FFFFFF"));
+            }
+        });
+
+        LinearLayout.LayoutParams lpCancel = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpCancel.rightMargin = 20;
+        btnCancel.setLayoutParams(lpCancel);
+
+        actionsButtonBar.addView(btnCancel);
+        actionsButtonBar.addView(btnOk);
+        mainLayout.addView(actionsButtonBar);
+
+        scrollView.addView(mainLayout);
+
+        // 👈 Dialog me mainLayout ki jagah ScrollView pass kiya hai
+        AlertDialog dialog = new AlertDialog.Builder(this).setView(scrollView).create();
+        lvVideo.setOnItemClickListener((parent, view, position, id) -> {
+            lvVideo.setItemChecked(position, true);
+        });
+        lvAudio.setOnItemClickListener((parent, view, position, id) -> {
+            lvAudio.setItemChecked(position, true);
+        });
+        btnCancel.setOnClickListener(v -> dialog.dismiss());
+        btnOk.setOnClickListener(v -> {
+            TrackSelectionParameters.Builder parametersBuilder = player.getTrackSelectionParameters().buildUpon();
+            int videoSelection = lvVideo.getCheckedItemPosition();
+            if (videoSelection == 0) {
+                parametersBuilder.clearOverridesOfType(C.TRACK_TYPE_VIDEO);
+            } else if (videoSelection > 0 && !videoOverrides.isEmpty()) {
+                parametersBuilder.setOverrideForType(videoOverrides.get(videoSelection - 1));
+            }
+
+            int audioSelection = lvAudio.getCheckedItemPosition();
+            if (audioSelection == 0) {
+                parametersBuilder.clearOverridesOfType(C.TRACK_TYPE_AUDIO);
+            } else if (audioSelection > 0 && !audioOverrides.isEmpty()) {
+                parametersBuilder.setOverrideForType(audioOverrides.get(audioSelection - 1));
+            }
+
+            player.setTrackSelectionParameters(parametersBuilder.build());
+            dialog.dismiss();
+        });
+
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+        }
+        dialog.show();
+    }
+
+    private void toggleMuteAction() {
+        if (player != null && btnMute != null) {
+            isMuted = !isMuted;
+            if (isMuted) {
+                player.setVolume(0f);
+                btnMute.setImageResource(R.drawable.ic_unmute_custom);
+            } else {
+                player.setVolume(1f);
+                btnMute.setImageResource(R.drawable.ic_mute_custom);
+            }
+        }
+    }
+
+    private void setupSwipeGestures() {
+        if (playerView == null) return;
+        gestureHideRunnable = () -> {
+            if (premiumGestureHud != null) premiumGestureHud.setVisibility(View.GONE);
+        };
+
+        playerView.setOnTouchListener(new View.OnTouchListener() {
+            private float startX, startY;
+            private float baseVolume, baseBrightness;
+            private boolean isThresholdPassed = false;
+
+            private int currentSequentialPercent = 0;
+            private float accumulatedDeltaY = 0f;
+            private final float SWIPE_THRESHOLD = 40;
+            private final float PIXELS_PER_STEP = 15f;
+
+            @Override
+            public boolean onTouch(View v, MotionEvent event) {
+                if (isScreenLocked) return false;
+
+                DisplayMetrics displayMetrics = getResources().getDisplayMetrics();
+                int screenWidth = displayMetrics.widthPixels;
+                AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                WindowManager.LayoutParams layoutParams = getWindow().getAttributes();
+
+                switch (event.getAction()) {
+                    case MotionEvent.ACTION_DOWN:
+                        startX = event.getX();
+                        startY = event.getY();
+                        isThresholdPassed = false;
+                        accumulatedDeltaY = 0f;
+
+                        if (audioManager != null) {
+                            int maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                            int curVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+                            baseVolume = curVol;
+                            currentSequentialPercent = (int) (((float) curVol / maxVol) * 100);
+                        }
+
+                        float sysBright = layoutParams.screenBrightness;
+                        baseBrightness = sysBright < 0 ? 0.5f : sysBright;
+                        if (startX <= (screenWidth / 2)) {
+                            currentSequentialPercent = (int) (baseBrightness * 100);
+                        }
+                        return false;
+                    case MotionEvent.ACTION_MOVE:
+                        float deltaX = event.getX() - startX;
+                        float deltaY = startY - event.getY();
+
+                        if (!isThresholdPassed) {
+                            if (Math.abs(deltaY) > Math.abs(deltaX) && Math.abs(deltaY) > SWIPE_THRESHOLD) {
+                                isThresholdPassed = true;
+                                startY = event.getY();
+                                accumulatedDeltaY = 0f;
+                            }
+                        }
+
+                        if (isThresholdPassed) {
+                            gestureHideHandler.removeCallbacks(gestureHideRunnable);
+                            if (premiumGestureHud != null)
+                                premiumGestureHud.setVisibility(View.VISIBLE);
+                            float stepDiff = event.getY() - startY;
+                            startY = event.getY();
+                            accumulatedDeltaY -= stepDiff;
+                            while (Math.abs(accumulatedDeltaY) >= PIXELS_PER_STEP) {
+                                if (accumulatedDeltaY > 0) {
+                                    currentSequentialPercent++;
+                                    accumulatedDeltaY -= PIXELS_PER_STEP;
+                                } else {
+                                    currentSequentialPercent--;
+                                    accumulatedDeltaY += PIXELS_PER_STEP;
+                                }
+                            }
+
+                            if (currentSequentialPercent > 100) currentSequentialPercent = 100;
+                            if (currentSequentialPercent < 0) currentSequentialPercent = 0;
+
+                            if (startX > (screenWidth / 2)) {
+                                if (audioManager != null) {
+                                    int maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                                    int targetVolumeValue = (int) (((float) currentSequentialPercent / 100f) * maxVol);
+                                    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetVolumeValue, 0);
+                                    if (imgPremiumIconHud != null) {
+                                        imgPremiumIconHud.setImageResource(R.drawable.ic_volume_hud);
+                                    }
+                                    if (txtPremiumPercentage != null) {
+                                        txtPremiumPercentage.setText(currentSequentialPercent + "%");
+                                    }
+                                    if (hudCircularProgress != null) {
+                                        hudCircularProgress.setMax(10000);
+                                        hudCircularProgress.setProgress(currentSequentialPercent * 100);
+                                    }
+                                }
+                            } else {
+                                float targetBrightnessValue = (float) currentSequentialPercent / 100f;
+                                if (targetBrightnessValue > 1.0f) targetBrightnessValue = 1.0f;
+                                if (targetBrightnessValue < 0.01f) targetBrightnessValue = 0.01f;
+                                layoutParams.screenBrightness = targetBrightnessValue;
+                                getWindow().setAttributes(layoutParams);
+
+                                if (imgPremiumIconHud != null) {
+                                    imgPremiumIconHud.setImageResource(R.drawable.ic_brightness_hud);
+                                }
+                                if (txtPremiumPercentage != null) {
+                                    txtPremiumPercentage.setText(currentSequentialPercent + "%");
+                                }
+                                if (hudCircularProgress != null) {
+                                    hudCircularProgress.setMax(10000);
+                                    hudCircularProgress.setProgress(currentSequentialPercent * 100);
+                                }
+                            }
+
+                            v.getParent().requestDisallowInterceptTouchEvent(true);
+                            return true;
+                        }
+                        break;
+                    case MotionEvent.ACTION_UP:
+                        if (isThresholdPassed) {
+                            gestureHideHandler.removeCallbacks(gestureHideRunnable);
+                            gestureHideHandler.postDelayed(gestureHideRunnable, 1200);
+                            return true;
+                        }
+                        break;
+                }
+                return isThresholdPassed;
+            }
+        });
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        hideSystemUI();
+        if (player == null) {
+            String rawUrl = getStreamUrlFromIntent();
+            prepareAndPlay(rawUrl, false);
+        } else {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode()) {
+                player.play();
+            } else {
+                player.setPlayWhenReady(true);
+                player.play();
+            }
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode()) {
+            if (player != null) {
+                player.play();
+            }
+        } else {
+            if (player != null) {
+                playbackPosition = player.getCurrentPosition();
+                currentWindow = player.getCurrentMediaItemIndex();
+                playWhenReady = player.getPlayWhenReady();
+                player.setPlayWhenReady(false);
+            }
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (epgExecutor != null) {
+            epgExecutor.shutdownNow();
+        }
+        if (player != null) {
+            player.release();
+            player = null;
+        }
+        webHandler.removeCallbacksAndMessages(null);
+    }
+
+    @Override
+    protected void onUserLeaveHint() {
+        super.onUserLeaveHint();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            triggerPipTransitionMode();
+        }
+    }
+
+    @Override
+    public void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(lp);
+        }
+    }
+
+    private void toggleFullscreenAndOrientation(boolean enterFullscreen) {
+        if (getSupportActionBar() != null) {
+            if (enterFullscreen) getSupportActionBar().hide();
+            else getSupportActionBar().show();
+        }
+
+        if (enterFullscreen) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                getWindow().setDecorFitsSystemWindows(false);
+                WindowInsetsController controller = getWindow().getInsetsController();
+                if (controller != null) {
+                    controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                    controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                }
+            } else {
+                getWindow().getDecorView().setSystemUiVisibility(
+                        View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                                | View.SYSTEM_UI_FLAG_FULLSCREEN
+                                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                );
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                getWindow().addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+                getWindow().setStatusBarColor(Color.TRANSPARENT);
+                getWindow().setNavigationBarColor(Color.TRANSPARENT);
+            }
+        } else {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                getWindow().setDecorFitsSystemWindows(true);
+                WindowInsetsController controller = getWindow().getInsetsController();
+                if (controller != null) {
+                    controller.show(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                }
+            } else {
+                getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+            }
+        }
+    }
+
+    private OkHttpClient createClient() {
+        return new OkHttpClient.Builder()
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .connectTimeout(25, TimeUnit.SECONDS)
+                .readTimeout(25, TimeUnit.SECONDS)
+                .cookieJar(new CookieJar() {
+                    @Override
+                    public void saveFromResponse(@NonNull HttpUrl url, @NonNull List<Cookie> cookies) {
+                        cookieStore.put(url.host(), cookies);
+                    }
+
+                    @NonNull
+                    @Override
+                    public List<Cookie> loadForRequest(@NonNull HttpUrl url) {
+                        return cookieStore.getOrDefault(url.host(), new ArrayList<>());
+                    }
+                }).build();
+    }
+
+    private void fetchCookiesFromJsonUrl(String cookieJsonUrl, String targetStreamUrl, Runnable onCookiesReady) {
+        if (!cookieJsonUrl.startsWith("http")) {
+            parseCookieJsonData(cookieJsonUrl, targetStreamUrl);
+            runOnUiThread(onCookiesReady);
+            return;
+        }
+
+        OkHttpClient client = MyOkHttpBuilder.getUnsafeOkHttpClient();
+        Request request = new Request.Builder().url(cookieJsonUrl).build();
+
+        client.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(@NonNull okhttp3.Call call, @NonNull IOException e) {
+                Log.e("CookieJson", "Failed to fetch JSON: " + e.getMessage());
+                runOnUiThread(onCookiesReady);
+            }
+
+            @Override
+            public void onResponse(@NonNull okhttp3.Call call, @NonNull Response response) throws IOException {
+                if (response.isSuccessful() && response.body() != null) {
+                    String jsonStr = response.body().string();
+                    parseCookieJsonData(jsonStr, targetStreamUrl);
+                }
+                runOnUiThread(onCookiesReady);
+            }
+        });
+    }
+
+    private void parseCookieJsonData(String jsonStr, String targetStreamUrl) {
+        try {
+            jsonStr = jsonStr.trim();
+            if (jsonStr.startsWith("[")) {
+                JSONArray jsonArray = new JSONArray(jsonStr);
+                for (int i = 0; i < jsonArray.length(); i++) {
+                    Object item = jsonArray.opt(i);
+                    if (item instanceof JSONObject) {
+                        JSONObject obj = (JSONObject) item;
+
+                        if (obj.has("cookie")) {
+                            extractAndStoreDirectCookie(obj.optString("cookie"), targetStreamUrl);
+                        }
+                        if (obj.has("ready_to_use_link")) {
+                            String rtu = obj.optString("ready_to_use_link");
+                            if (rtu.contains("__hdnea__=")) {
+                                int idx = rtu.indexOf("__hdnea__=");
+                                String sub = rtu.substring(idx);
+                                extractAndStoreDirectCookie(sub, targetStreamUrl);
+                            }
+                        }
+
+                        java.util.Iterator<String> keys = obj.keys();
+                        while (keys.hasNext()) {
+                            String key = keys.next();
+                            String val = obj.optString(key);
+                            if (val.contains("__hdnea__=") || key.equalsIgnoreCase("cookie") || (val.contains("st=") && val.contains("exp="))) {
+                                extractAndStoreDirectCookie(val, targetStreamUrl);
+                            }
+                        }
+                    } else if (item instanceof String) {
+                        extractAndStoreDirectCookie((String) item, targetStreamUrl);
+                    }
+                }
+            } else if (jsonStr.startsWith("{")) {
+                JSONObject jsonObject = new JSONObject(jsonStr);
+                if (jsonObject.has("cookie")) {
+                    extractAndStoreDirectCookie(jsonObject.optString("cookie"), targetStreamUrl);
+                }
+                java.util.Iterator<String> keys = jsonObject.keys();
+                while (keys.hasNext()) {
+                    String key = keys.next();
+                    Object valObj = jsonObject.opt(key);
+                    if (valObj instanceof String) {
+                        String val = (String) valObj;
+                        if (val.contains("__hdnea__=") || key.equalsIgnoreCase("cookie") || val.contains("st=")) {
+                            extractAndStoreDirectCookie(val, targetStreamUrl);
+                        }
+                    } else if (valObj instanceof JSONArray) {
+                        parseCookieJsonData(valObj.toString(), targetStreamUrl);
+                    }
+                }
+            } else {
+                extractAndStoreDirectCookie(jsonStr, targetStreamUrl);
+            }
+        } catch (Exception e) {
+            Log.e("CookieJson", "Universal parsing error: " + e.getLocalizedMessage());
+        }
+    }
+
+    private void extractAndStoreDirectCookie(String cookieString, String targetStreamUrl) {
+        if (cookieString == null || cookieString.trim().isEmpty()) return;
+
+        if (cookieString.contains("&")) {
+            cookieString = cookieString.split("&")[0];
+        }
+
+        String cookieName = "__hdnea__";
+        String cookieValue = "";
+
+        if (cookieString.contains("__hdnea__=")) {
+            int idx = cookieString.indexOf("__hdnea__=");
+            String sub = cookieString.substring(idx + 10);
+            cookieValue = sub.contains(";") ? sub.split(";")[0] : sub;
+        } else if (cookieString.contains("=")) {
+            String[] parts = cookieString.split("=", 2);
+            cookieName = parts[0].trim();
+            cookieValue = parts[1].trim().split(";")[0];
+        } else {
+            cookieValue = cookieString.trim();
+        }
+
+        if (!cookieValue.isEmpty()) {
+            String hostDomain = "";
+            String rootDomain = "";
+
+            try {
+                if (targetStreamUrl != null && !targetStreamUrl.trim().isEmpty()) {
+                    Uri uri = Uri.parse(targetStreamUrl);
+                    if (uri != null) {
+                        hostDomain = uri.getHost();
+                    }
+                }
+            } catch (Exception ignored) {}
+
+            if (hostDomain == null || hostDomain.trim().isEmpty()) {
+                try {
+                    Uri fallbackUri = Uri.parse(getStreamUrlFromIntent());
+                    hostDomain = fallbackUri.getHost();
+                } catch (Exception ignored) {}
+            }
+
+            if (hostDomain == null || hostDomain.trim().isEmpty()) {
+                hostDomain = "api.streambox.local";
+            } else {
+                try {
+                    String[] parts = hostDomain.split("\\.");
+                    if (parts != null && parts.length >= 2) {
+                        rootDomain = "." + parts[parts.length - 2] + "." + parts[parts.length - 1];
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            try {
+                Cookie cookie = new Cookie.Builder()
+                        .name(cookieName)
+                        .value(cookieValue)
+                        .domain(hostDomain)
+                        .build();
+
+                List<Cookie> hostCookies = cookieStore.computeIfAbsent(hostDomain, k -> new ArrayList<>());
+                boolean exists = false;
+                for (Cookie c : hostCookies) {
+                    if (c != null && c.name() != null && c.name().equals(cookieName)) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    hostCookies.add(cookie);
+                }
+
+                if (!rootDomain.isEmpty() && !rootDomain.equals(hostDomain)) {
+                    Cookie rootCookie = new Cookie.Builder()
+                            .name(cookieName)
+                            .value(cookieValue)
+                            .domain(rootDomain)
+                            .build();
+                    List<Cookie> rootCookies = cookieStore.computeIfAbsent(rootDomain, k -> new ArrayList<>());
+                    rootCookies.add(rootCookie);
+                }
+            } catch (Exception e) {
+                Log.e("CookieStore", "Failed to build cookie: " + e.getMessage());
+            }
+        }
+    }
+
+    private void prepareAndPlay(String rawUrl, boolean isHotSwap) {
+        if (!isHotSwap) tokenRefreshCount = 0;
+
+        String[] mainParts = rawUrl.split("\\|");
+        String queryParams = mainParts.length > 1 ? mainParts[1].trim() : "";
+        String cookieJsonUrl = "";
+        String baseStreamForDynamicDomain = mainParts[0].trim();
+
+        if (!queryParams.isEmpty()) {
+            for (String pair : queryParams.split("&")) {
+                String[] kv = pair.split("=", 2);
+                if (kv.length == 2) {
+                    String key = kv[0].trim();
+                    String val = kv[1].trim();
+                    if (key.equalsIgnoreCase("cookieJson") || key.equalsIgnoreCase("cookie_json")) {
+                        cookieJsonUrl = val;
+                        break;
+                    } else if (key.equalsIgnoreCase("Cookie") && val.startsWith("http")) {
+                        cookieJsonUrl = val;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (rawUrl.trim().startsWith("[") || rawUrl.trim().startsWith("{")) {
+            try {
+                String extractedMpd = "";
+                String extractedCookie = "";
+                String extractedKeyId = "";
+                String extractedKey = "";
+
+                if (rawUrl.trim().startsWith("[")) {
+                    JSONArray arr = new JSONArray(rawUrl);
+                    for (int i = 0; i < arr.length(); i++) {
+                        JSONObject obj = arr.optJSONObject(i);
+                        if (obj != null) {
+                            if (obj.has("ready_to_use_link")) {
+                                extractedMpd = obj.optString("ready_to_use_link");
+                                break;
+                            } else if (obj.has("mpd_url")) {
+                                extractedMpd = obj.optString("mpd_url");
+                                if (obj.has("cookie")) extractedCookie = obj.optString("cookie");
+                                if (obj.has("keyId")) extractedKeyId = obj.optString("keyId");
+                                if (obj.has("key")) extractedKey = obj.optString("key");
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (!extractedMpd.isEmpty()) {
+                    baseStreamForDynamicDomain = extractedMpd;
+                    rawUrl = extractedMpd;
+                    if (!rawUrl.contains("|") && (!extractedCookie.isEmpty() || (!extractedKeyId.isEmpty() && !extractedKey.isEmpty()))) {
+                        StringBuilder sb = new StringBuilder(rawUrl);
+                        boolean hasParam = false;
+                        if (!extractedCookie.isEmpty()) {
+                            sb.append("|Cookie=").append(extractedCookie);
+                            hasParam = true;
+                        }
+                        if (!extractedKeyId.isEmpty() && !extractedKey.isEmpty()) {
+                            sb.append(hasParam ? "&" : "|").append("drmScheme=clearkey&drmLicense=").append(extractedKeyId).append(":").append(extractedKey);
+                        }
+                        rawUrl = sb.toString();
+                    }
+                }
+            } catch (Exception ignored) {}
+
+            parseCookieJsonData(rawUrl, baseStreamForDynamicDomain);
+        }
+
+        if (!cookieJsonUrl.isEmpty()) {
+            final String finalRawUrl = rawUrl;
+            final String finalBaseStream = baseStreamForDynamicDomain;
+            fetchCookiesFromJsonUrl(cookieJsonUrl, finalBaseStream, () -> executeStreamPreparation(finalRawUrl, isHotSwap));
+            return;
+        }
+
+        if (rawUrl.contains("__hdnea__=")) {
+            extractAndStoreDirectCookie(rawUrl, baseStreamForDynamicDomain);
+        }
+
+        executeStreamPreparation(rawUrl, isHotSwap);
+    }
+
+    private void executeStreamPreparation(String rawUrl, boolean isHotSwap) {
+        String[] parts = rawUrl.split("\\|");
+        String initialUrl = parts[0].trim();
+        String params = parts.length > 1 ? parts.length > 1 ? parts[1].trim() : "" : "";
+
+        // 🔄 SharedPreferences se dynamic proxy/worker domains get karo, strong default fallback ke sath
+        android.content.SharedPreferences prefs = getSharedPreferences("sys_blob_store", MODE_PRIVATE);
+        String proxyExtns = prefs.getString("extn", "workers.dev,pages.dev,proxy,redirect");
+
+        boolean isProxyOrWorker = false;
+        try {
+            if (proxyExtns != null && !proxyExtns.trim().isEmpty()) {
+                String[] extnList = proxyExtns.split(",");
+                for (String extn : extnList) {
+                    String trimmedExtn = extn.trim();
+                    if (!trimmedExtn.isEmpty() && initialUrl.contains(trimmedExtn)) {
+                        isProxyOrWorker = true;
+                        break;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        String lowerUrl = initialUrl.toLowerCase();
+        if (!isProxyOrWorker && (lowerUrl.endsWith(".m3u8") || lowerUrl.contains(".m3u8?") || lowerUrl.contains(".php/") || lowerUrl.endsWith(".mpd") || lowerUrl.endsWith(".mp4") || lowerUrl.endsWith(".ts"))) {
+            runOnUiThread(() -> startStreaming(initialUrl, params, isHotSwap));
+            return;
+        }
+
+        new Thread(() -> {
+            try {
+                if (isHotSwap) {
+                    final String cleanUrl = initialUrl;
+                    runOnUiThread(() -> startStreaming(cleanUrl, "", true));
+                    return;
+                }
+
+                OkHttpClient client = createClient();
+                okhttp3.Request.Builder rb = new okhttp3.Request.Builder()
+                        .url(initialUrl)
+                        .get()
+                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                        .header("Accept", "*/*");
+
+                if (!params.isEmpty()) {
+                    for (String pair : params.split("&")) {
+                        String[] kv = pair.split("=", 2);
+                        if (kv.length == 2) {
+                            String k = kv[0].trim();
+                            String v = kv[1].trim();
+                            if (!k.equalsIgnoreCase("cookieJson") && !k.equalsIgnoreCase("cookie_json")) {
+                                if (k.equalsIgnoreCase("Cookie") && v.startsWith("http")) {
+                                    continue;
+                                }
+                                rb.header(k, v);
+                            }
+                        }
+                    }
+                }
+
+                try (okhttp3.Response response = client.newCall(rb.build()).execute()) {
+                    String finalUrl = response.request().url().toString();
+
+                    if (finalUrl.contains("__hdnea__=")) {
+                        try {
+                            Uri redirectedUri = Uri.parse(finalUrl);
+                            String tokenQuery = redirectedUri.getQueryParameter("__hdnea__");
+                            if (tokenQuery != null && !tokenQuery.isEmpty()) {
+                                extractAndStoreDirectCookie("__hdnea__=" + tokenQuery, finalUrl);
+                            } else {
+                                String sub = finalUrl.substring(finalUrl.indexOf("__hdnea__="));
+                                extractAndStoreDirectCookie(sub, finalUrl);
+                            }
+                        } catch (Exception e) {
+                            extractAndStoreDirectCookie(finalUrl, finalUrl);
+                        }
+                    }
+
+                    final String targetUrl = finalUrl;
+                    final String targetParams = params;
+                    runOnUiThread(() -> startStreaming(targetUrl, targetParams, false));
+                }
+            } catch (Exception e) {
+                String[] fallbackParts = rawUrl.split("\\|");
+                String fallbackUrl = fallbackParts[0].trim();
+                String fallbackParams = fallbackParts.length > 1 ? fallbackParts[1].trim() : "";
+
+                if (fallbackUrl.contains("__hdnea__=")) {
+                    extractAndStoreDirectCookie(fallbackUrl, fallbackUrl);
+                }
+
+                runOnUiThread(() -> startStreaming(fallbackUrl, fallbackParams, isHotSwap));
+            }
+        }).start();
+    }
+
+    private void startStreaming(String streamUrl, String params, boolean isHotSwap) {
+        try {
+            Map<String, String> headers = new HashMap<>();
+            String drmLicense = "";
+
+            if (!params.isEmpty()) {
+                for (String pair : params.split("&")) {
+                    String[] kv = pair.split("=", 2);
+                    if (kv.length == 2) {
+                        String k = kv[0].trim();
+                        String v = kv[1].trim();
+                        if (k.equalsIgnoreCase("drmLicense")) {
+                            drmLicense = v;
+                        } else if (!k.equalsIgnoreCase("Cookie") || !v.startsWith("http")) {
+                            headers.put(k, v);
+                        }
+                    }
+                }
+            }
+
+            if (!headers.containsKey("Cookie")) {
+                if (streamUrl.contains("__hdnea__=")) {
+                    int startIndex = streamUrl.indexOf("__hdnea__=");
+                    int endIndex = streamUrl.indexOf("&", startIndex);
+                    String cookieSub = (endIndex == -1) ? streamUrl.substring(startIndex) : streamUrl.substring(startIndex, endIndex);
+                    headers.put("Cookie", cookieSub);
+                    extractAndStoreDirectCookie(cookieSub, streamUrl);
+                } else {
+                    try {
+                        Uri parsedUri = Uri.parse(streamUrl);
+                        String host = parsedUri.getHost();
+                        if (host != null && cookieStore.containsKey(host)) {
+                            List<Cookie> cookies = cookieStore.get(host);
+                            if (cookies != null && !cookies.isEmpty()) {
+                                StringBuilder sb = new StringBuilder();
+                                for (int i = 0; i < cookies.size(); i++) {
+                                    if (i > 0) sb.append("; ");
+                                    sb.append(cookies.get(i).name()).append("=").append(cookies.get(i).value());
+                                }
+                                headers.put("Cookie", sb.toString());
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+
+            if (!headers.containsKey("Accept")) {
+                headers.put("Accept", "*/*");
+            }
+
+            DefaultHttpDataSource.Factory httpDataSourceFactory = new DefaultHttpDataSource.Factory()
+                    .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                    .setConnectTimeoutMs(25000)
+                    .setReadTimeoutMs(25000)
+                    .setAllowCrossProtocolRedirects(true)
+                    .setKeepPostFor302Redirects(true);
+
+            if (!headers.isEmpty()) {
+                httpDataSourceFactory.setDefaultRequestProperties(headers);
+            }
+
+            DefaultExtractorsFactory extractorsFactory = new DefaultExtractorsFactory()
+                    .setTsExtractorFlags(
+                            DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES
+                                    | DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS
+                    )
+                    .setTsExtractorTimestampSearchBytes(1500 * 188);
+
+            DefaultMediaSourceFactory sourceFactory = new DefaultMediaSourceFactory(this, extractorsFactory)
+                    .setDataSourceFactory(httpDataSourceFactory);
+
+            if (!drmLicense.isEmpty()) {
+                final String finalDrmLicense = drmLicense;
+                if (finalDrmLicense.startsWith("http")) {
+                    sourceFactory.setDrmSessionManagerProvider(unused -> {
+                        HttpMediaDrmCallback httpDrmCallback = new HttpMediaDrmCallback(finalDrmLicense, httpDataSourceFactory);
+                        for (Map.Entry<String, String> entry : headers.entrySet()) {
+                            httpDrmCallback.setKeyRequestProperty(entry.getKey(), entry.getValue());
+                        }
+                        httpDrmCallback.setKeyRequestProperty("Referer", streamUrl);
+                        return new DefaultDrmSessionManager.Builder()
+                                .setUuidAndExoMediaDrmProvider(C.CLEARKEY_UUID, FrameworkMediaDrm.DEFAULT_PROVIDER)
+                                .build(httpDrmCallback);
+                    });
+                } else {
+                    String[] keys = drmLicense.split(":");
+                    if (keys.length >= 2) {
+                        String drmJson = "{\"keys\":[{\"kty\":\"oct\",\"k\":\"" + hexToBase64Url(keys[1]) + "\",\"kid\":\"" + hexToBase64Url(keys[0]) + "\"}],\"type\":\"temporary\"}";
+                        sourceFactory.setDrmSessionManagerProvider(unused -> new DefaultDrmSessionManager.Builder()
+                                .setUuidAndExoMediaDrmProvider(C.CLEARKEY_UUID, FrameworkMediaDrm.DEFAULT_PROVIDER)
+                                .build(new LocalMediaDrmCallback(drmJson.getBytes())));
+                    }
+                }
+            }
+
+            // 🚀 FAST ZAPPING & SMOOTH SWITCH
+            if (player == null) {
+                DefaultRenderersFactory renderersFactory = new DefaultRenderersFactory(this)
+                        .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+                        .setEnableDecoderFallback(true);
+
+                TrackSelectionParameters trackSelectionParameters = new TrackSelectionParameters.Builder(this)
+                        .setSelectUndeterminedTextLanguage(true)
+                        .build();
+
+                DefaultLoadControl fastLoadControl = new DefaultLoadControl.Builder()
+                        .setBufferDurationsMs(
+                                2000,
+                                10000,
+                                500,
+                                1000
+                        ).build();
+
+                player = new ExoPlayer.Builder(this, renderersFactory)
+                        .setMediaSourceFactory(sourceFactory)
+                        .setLoadControl(fastLoadControl)
+                        .build();
+
+                player.setTrackSelectionParameters(trackSelectionParameters);
+
+                // ✅ 1st Time Initialization par Video Scaling Mode FILL ke compatible set kiya
+                player.setVideoScalingMode(C.VIDEO_SCALING_MODE_SCALE_TO_FIT);
+
+                playerView.setPlayer(player);
+                setupPlayerErrorListener();
+            }
+
+            // ✅ Naya Safe Code (Purana logic safe rahega aur tokens strip nahi honge)
+            String cleanStreamUrl = streamUrl;
+            if (cleanStreamUrl.contains("?") && !cleanStreamUrl.contains(".m3u8") && !cleanStreamUrl.contains(".mpd")) {
+                cleanStreamUrl = cleanStreamUrl.split("\\?")[0];
+            }
+
+            MediaItem.Builder mediaItemBuilder = new MediaItem.Builder().setUri(Uri.parse(cleanStreamUrl));
+
+            String cleanPath = cleanStreamUrl.toLowerCase();
+
+            if (cleanPath.endsWith(".mpd") || streamUrl.toLowerCase().contains("dash") || streamUrl.toLowerCase().contains("manifest")) {
+                mediaItemBuilder.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_MPD);
+            } else if (cleanPath.endsWith(".m3u8") || cleanPath.contains(".m3u8") || streamUrl.toLowerCase().contains("play.php") || streamUrl.toLowerCase().contains("hls") || cleanPath.endsWith(".php") || cleanPath.contains(".php/")) {
+                mediaItemBuilder.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8);
+            } else if (cleanPath.endsWith(".ts")) {
+                mediaItemBuilder.setMimeType("video/mp2t");
+            }
+            else if (cleanPath.endsWith(".mp4") || cleanPath.endsWith(".m4v")) {
+                mediaItemBuilder.setMimeType(androidx.media3.common.MimeTypes.VIDEO_MP4);
+            } else if (cleanPath.endsWith(".mkv")) {
+                mediaItemBuilder.setMimeType(androidx.media3.common.MimeTypes.VIDEO_MATROSKA);
+            } else if (cleanPath.endsWith(".webm")) {
+                mediaItemBuilder.setMimeType(androidx.media3.common.MimeTypes.VIDEO_WEBM);
+            } else if (cleanPath.endsWith(".3gp") || cleanPath.endsWith(".3gpp")) {
+                mediaItemBuilder.setMimeType("video/3gpp");
+            } else if (cleanPath.endsWith(".avi")) {
+                mediaItemBuilder.setMimeType(androidx.media3.common.MimeTypes.VIDEO_AVI);
+            } else if (cleanPath.endsWith(".flv")) {
+                mediaItemBuilder.setMimeType(androidx.media3.common.MimeTypes.VIDEO_FLV);
+            } else if (cleanPath.endsWith(".mov")) {
+                mediaItemBuilder.setMimeType("video/quicktime");
+            }
+            else if (cleanPath.endsWith(".mp3")) {
+                mediaItemBuilder.setMimeType(androidx.media3.common.MimeTypes.AUDIO_MPEG);
+            } else if (cleanPath.endsWith(".aac")) {
+                mediaItemBuilder.setMimeType(androidx.media3.common.MimeTypes.AUDIO_AAC);
+            } else if (cleanPath.endsWith(".m4a")) {
+                mediaItemBuilder.setMimeType(androidx.media3.common.MimeTypes.AUDIO_MP4);
+            } else if (cleanPath.endsWith(".flac")) {
+                mediaItemBuilder.setMimeType(androidx.media3.common.MimeTypes.AUDIO_FLAC);
+            } else if (cleanPath.endsWith(".ogg") || cleanPath.endsWith(".opus")) {
+                mediaItemBuilder.setMimeType(androidx.media3.common.MimeTypes.AUDIO_OGG);
+            }
+
+            MediaItem mediaItem = mediaItemBuilder.build();
+
+            if (isHotSwap) {
+                long currentPos = player.getCurrentPosition();
+                player.setMediaSource(sourceFactory.createMediaSource(mediaItem), false);
+                player.seekTo(currentPos);
+            } else {
+                player.setMediaSource(sourceFactory.createMediaSource(mediaItem));
+                if (playbackPosition > 0) {
+                    player.seekTo(currentWindow, playbackPosition);
+                    playbackPosition = 0;
+                }
+            }
+
+            // ✅ 1st Time play hote hi FILL mode enforce aur View requestLayout trigger
+            if (playerView != null) {
+                playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FILL);
+                playerView.requestLayout();
+            }
+            if (player != null) {
+                player.setVideoScalingMode(C.VIDEO_SCALING_MODE_SCALE_TO_FIT);
+            }
+            if (btnZoom != null) {
+                btnZoom.setText("FILL");
+            }
+            resizeModeIndex = 1;
+
+            player.setPlayWhenReady(true);
+            player.prepare();
+            player.play();
+
+            playerView.post(() -> {
+                View exoBuffenering = playerView.findViewById(androidx.media3.ui.R.id.exo_buffering);
+                if (exoBuffenering instanceof ProgressBar) {
+                    ProgressBar progressBar = (ProgressBar) exoBuffenering;
+                    int sizeInPx = (int) (65 * getResources().getDisplayMetrics().density);
+                    ViewGroup.LayoutParams paramsLayout = progressBar.getLayoutParams();
+                    if (paramsLayout != null) {
+                        paramsLayout.width = sizeInPx;
+                        paramsLayout.height = sizeInPx;
+                        progressBar.setLayoutParams(paramsLayout);
+                    }
+                    progressBar.getIndeterminateDrawable().setColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN);
+                }
+            });
+
+        } catch (Exception e) {
+            runOnUiThread(() -> Toast.makeText(this, "Error: " + e.getMessage(), Toast.LENGTH_LONG).show());
+        }
+    }
+
+    private void setupPlayerErrorListener() {
+        if (player == null) return;
+        player.addListener(new Player.Listener() {
+            @Override
+            public void onPlayerError(@NonNull PlaybackException error) {
+                Log.e("PlayerError", "ExoPlayer Error Code: " + error.errorCode + " [" + error.getErrorCodeName() + "], Message: " + error.getMessage(), error);
+
+                if (tokenRefreshCount >= 1) {
+                    runOnUiThread(() -> {
+                        tokenRefreshCount = 0;
+                        if (player != null) player.stop();
+                        Toast.makeText(PlayerActivity.this, "Playback Error", Toast.LENGTH_LONG).show();
+                    });
+                    return;
+                }
+                tokenRefreshCount++;
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    if (isFinishing() || isDestroyed() || player == null) return;
+                    Intent intent = getIntent();
+                    String sharedData = intent.getStringExtra("url");
+                    if (sharedData == null && intent.getData() != null)
+                        sharedData = intent.getData().toString();
+
+                    if (sharedData != null && sharedData.contains("|")) {
+                        String cleanUrl = sharedData.split("\\|")[0].trim();
+                        intent.putExtra("url", cleanUrl);
+                        setIntent(intent);
+                        prepareAndPlay(cleanUrl, true);
+                    } else {
+                        player.prepare();
+                        player.play();
+                    }
+                }, 1000);
+            }
+
+            @Override
+            public void onPlaybackStateChanged(int playbackState) {
+                if (playbackState == Player.STATE_READY) {
+                    tokenRefreshCount = 0;
+
+                    // ✅ Stream Ready hote hi Surface View ko FILL format me update
+                    if (playerView != null) {
+                        playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FILL);
+                        View surface = playerView.getVideoSurfaceView();
+                        if (surface != null) {
+                            surface.requestLayout();
+                        }
+                    }
+
+                    ImageView ivWatermark = findViewById(R.id.iv_watermark);
+                    if (ivWatermark != null) {
+                        ivWatermark.setVisibility(View.VISIBLE);
+                    }
+                    runOnUiThread(() -> updateDthQualityAndAudioBadges());
+                } else if (playbackState == Player.STATE_ENDED) {
+                    if (player != null) {
+                        player.seekToDefaultPosition();
+                        player.prepare();
+                        player.play();
+                    }
+                }
+            }
+
+            @Override
+            public void onTracksChanged(@NonNull androidx.media3.common.Tracks tracks) {
+                runOnUiThread(() -> updateDthQualityAndAudioBadges());
+            }
+
+            @Override
+            public void onVideoSizeChanged(@NonNull androidx.media3.common.VideoSize videoSize) {
+                runOnUiThread(() -> {
+                    if (playerView != null) {
+                        playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FILL);
+                    }
+                    updateDthQualityAndAudioBadges();
+                });
+            }
+        });
+    }
+
+    private String hexToBase64Url(String hex) {
+        try {
+            int len = hex.length();
+            byte[] data = new byte[len / 2];
+            for (int i = 0; i < len; i += 2)
+                data[i / 2] = (byte) ((Character.digit(hex.charAt(i), 16) << 4) + Character.digit(hex.charAt(i + 1), 16));
+            return Base64.encodeToString(data, Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    // =========================================================================
+    // 🏷️ CATEGORY ADAPTER
+    // =========================================================================
+    public interface OnCategoryClickListener {
+        void onCategoryClick(String category);
+    }
+
+    public class QuickCategoryAdapter extends RecyclerView.Adapter<QuickCategoryAdapter.ViewHolder> {
+        private final List<String> categories;
+        private final OnCategoryClickListener listener;
+
+        public QuickCategoryAdapter(List<String> categories, OnCategoryClickListener listener) {
+            this.categories = categories;
+            this.listener = listener;
+        }
+
+        @NonNull
+        @Override
+        public ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
+            View view = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_quick_category, parent, false);
+            return new ViewHolder(view);
+        }
+
+        @Override
+        public void onBindViewHolder(@NonNull ViewHolder holder, int position) {
+            String category = categories.get(position);
+            holder.tvTitle.setText(category);
+
+            boolean isSelected = category.equalsIgnoreCase(selectedCategory);
+
+            if (isSelected) {
+                holder.cardBadge.setCardBackgroundColor(Color.parseColor("#2754F5"));
+                holder.tvTitle.setTextColor(Color.parseColor("#FFFFFF"));
+            } else {
+                holder.cardBadge.setCardBackgroundColor(Color.parseColor("#22FFFFFF"));
+                holder.tvTitle.setTextColor(Color.parseColor("#FFFFFF"));
+            }
+
+            holder.cardBadge.setOnFocusChangeListener((v, hasFocus) -> {
+                if (hasFocus) {
+                    holder.cardBadge.setCardBackgroundColor(Color.parseColor("#FFFFFF"));
+                    holder.tvTitle.setTextColor(Color.parseColor("#000000"));
+                } else {
+                    boolean stillSelected = category.equalsIgnoreCase(selectedCategory);
+                    holder.cardBadge.setCardBackgroundColor(stillSelected ? Color.parseColor("#2754F5") : Color.parseColor("#22FFFFFF"));
+                    holder.tvTitle.setTextColor(stillSelected ? Color.parseColor("#FFFFFF") : Color.parseColor("#FFFFFF"));
+                }
+            });
+
+            holder.cardBadge.setOnClickListener(v -> {
+                if (listener != null) {
+                    listener.onCategoryClick(category);
+                    notifyDataSetChanged();
+                }
+            });
+        }
+
+        @Override
+        public int getItemCount() {
+            return categories != null ? categories.size() : 0;
+        }
+
+        class ViewHolder extends RecyclerView.ViewHolder {
+            androidx.cardview.widget.CardView cardBadge;
+            TextView tvTitle;
+
+            ViewHolder(@NonNull View itemView) {
+                super(itemView);
+                cardBadge = itemView.findViewById(R.id.card_cat_badge);
+                tvTitle = itemView.findViewById(R.id.tv_category_title);
+            }
+        }
+    }
+
+    // =========================================================================
+    // 📺 CHANNEL LIST ADAPTER
+    // =========================================================================
+    public interface OnQuickChannelClickListener {
+        void onChannelClick(ChannelItem channel, int position);
+    }
+
+    public class QuickChannelAdapter extends RecyclerView.Adapter<QuickChannelAdapter.ViewHolder> {
+        private final List<ChannelItem> channelList;
+        private final OnQuickChannelClickListener listener;
+
+        public QuickChannelAdapter(List<ChannelItem> channelList, OnQuickChannelClickListener listener) {
+            this.channelList = channelList;
+            this.listener = listener;
+        }
+
+        @NonNull
+        @Override
+        public ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
+            View view = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_quick_channel, parent, false);
+            return new ViewHolder(view);
+        }
+
+        @Override
+        public void onBindViewHolder(@NonNull ViewHolder holder, int position) {
+            ChannelItem channel = channelList.get(position);
+
+            holder.tvName.setText((position + 1) + " • " + (channel.getName() != null ? channel.getName() : "Channel"));
+            holder.tvGroup.setText(channel.getGroupTitle() != null ? channel.getGroupTitle() : "Live TV");
+
+            holder.ivLogo.setImageResource(R.drawable.image_channel_loader);
+
+            if (channel.getLogoUrl() != null && !channel.getLogoUrl().trim().isEmpty()) {
+                final String logoUrl = channel.getLogoUrl().trim();
+                holder.ivLogo.setTag(logoUrl);
+
+                new Thread(() -> {
+                    try {
+                        java.net.URL url = new java.net.URL(logoUrl);
+                        java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+                        conn.setConnectTimeout(2500);
+                        conn.setReadTimeout(2500);
+                        conn.connect();
+
+                        if (conn.getResponseCode() == java.net.HttpURLConnection.HTTP_OK) {
+                            java.io.InputStream in = conn.getInputStream();
+                            final Bitmap bmp = BitmapFactory.decodeStream(in);
+                            in.close();
+
+                            if (bmp != null) {
+                                runOnUiThread(() -> {
+                                    if (logoUrl.equals(holder.ivLogo.getTag())) {
+                                        holder.ivLogo.setImageBitmap(bmp);
+                                    }
+                                });
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                }).start();
+            }
+
+            holder.itemView.setOnClickListener(v -> {
+                if (listener != null) {
+                    listener.onChannelClick(channel, position);
+                }
+            });
+        }
+
+        @Override
+        public int getItemCount() {
+            return channelList != null ? channelList.size() : 0;
+        }
+
+        class ViewHolder extends RecyclerView.ViewHolder {
+            ImageView ivLogo, ivPlaying;
+            TextView tvName, tvGroup;
+
+            ViewHolder(@NonNull View itemView) {
+                super(itemView);
+                ivLogo = itemView.findViewById(R.id.iv_quick_logo);
+                ivPlaying = itemView.findViewById(R.id.iv_now_playing_indicator);
+                tvName = itemView.findViewById(R.id.tv_quick_channel_name);
+                tvGroup = itemView.findViewById(R.id.tv_quick_channel_group);
+            }
+        }
+    }
+}
