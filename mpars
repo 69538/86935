@@ -1,0 +1,499 @@
+package com.hd.stream.iptv;
+
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.Log;
+import java.util.ArrayList;
+import java.util.List;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import java.util.Iterator;
+
+public class M3UParser {
+
+    private static final String TAG = "M3UParser";
+    private static final String DEFAULT_UA = "plaYtv/7.1.3 (Linux; Android 13) ygx/824.1 ExoPlayerLib/824.0";
+    private static Context appContext = null;
+
+    // 🚀 Dynamic cookie extraction engine from raw text
+    private static String extractCookieFromRawData(String rawData) {
+        if (rawData == null || rawData.isEmpty()) return "";
+        rawData = rawData.trim();
+
+        // Case A: JSON Array response parsing
+        if (rawData.startsWith("[")) {
+            try {
+                JSONArray rootArray = new JSONArray(rawData);
+                int targetIndex = rootArray.length() > 1 ? 1 : 0;
+                if (rootArray.length() > 0) {
+                    JSONObject obj = rootArray.getJSONObject(targetIndex);
+
+                    if (obj.has("headers")) {
+                        JSONObject headersObj = obj.optJSONObject("headers");
+                        if (headersObj != null) {
+                            if (headersObj.has("cookie")) return headersObj.optString("cookie");
+                            if (headersObj.has("Cookie")) return headersObj.optString("Cookie");
+                        }
+                    }
+                    if (obj.has("cookie")) return obj.optString("cookie");
+                    if (obj.has("Cookie")) return obj.optString("Cookie");
+
+                    String streamUrl = obj.has("mpd_url") ? obj.optString("mpd_url") :
+                            obj.has("url") ? obj.optString("url") :
+                            obj.has("stream_url") ? obj.optString("stream_url") : "";
+                    if (streamUrl.contains("?")) {
+                        String[] parts = streamUrl.split("\\?");
+                        if (parts.length > 1 && parts[1].contains("__hdnea__")) {
+                            return parts[1].trim();
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "JSON Cookie Extract Error: " + e.getMessage());
+            }
+        }
+        // Case B: M3U format response parsing
+        else if (rawData.contains("#EXTINF") || rawData.startsWith("#EXTM3U")) {
+            try {
+                String[] lines = rawData.split("\\r?\\n");
+                for (String line : lines) {
+                    line = line.trim();
+                    if (line.startsWith("#EXTHTTP:")) {
+                        String jsonPart = line.substring(9).trim();
+                        JSONObject httpObj = new JSONObject(jsonPart);
+                        if (httpObj.has("cookie")) return httpObj.optString("cookie");
+                        if (httpObj.has("Cookie")) return httpObj.optString("Cookie");
+                    }
+                    if (line.startsWith("http") && line.contains("?")) {
+                        String[] parts = line.split("\\?");
+                        if (parts.length > 1 && parts[1].contains("__hdnea__")) {
+                            return parts[1].trim();
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "M3U Cookie Extract Error: " + e.getMessage());
+            }
+        }
+        // Case C: Plain text response
+        else if (rawData.contains("__hdnea__")) {
+            if (rawData.contains("?")) {
+                String[] parts = rawData.split("\\?");
+                if (parts.length > 1) return parts[1].trim();
+            }
+            return rawData;
+        }
+
+        return "";
+    }
+
+    // 🔥 Sync fetch with cache buster and redirection check
+    private static String fetchCookieSync(String url) {
+        if (url == null || url.isEmpty()) return "";
+        url = url.trim();
+
+        if (url.contains("?")) {
+            String[] urlParts = url.split("\\?");
+            if (urlParts.length > 1 && urlParts[1].contains("__hdnea__")) {
+                String extracted = urlParts[1].trim();
+                return extracted;
+            }
+        }
+
+        try {
+            String cacheBuster = url.contains("?") ? "&t=" : "?t=";
+            String finalUrl = url + cacheBuster + System.currentTimeMillis();
+
+            OkHttpClient client = new OkHttpClient();
+            Request request = new Request.Builder()
+                    .url(finalUrl)
+                    .addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
+                    .addHeader("Pragma", "no-cache")
+                    .addHeader("Expires", "0")
+                    .addHeader("User-Agent", DEFAULT_UA)
+                    .build();
+
+            try (Response response = client.newCall(request).execute()) {
+                if (response.isSuccessful()) {
+                    String redirectUrl = response.request().url().toString();
+                    if (redirectUrl.contains("?")) {
+                        String[] finalParts = redirectUrl.split("\\?");
+                        if (finalParts.length > 1 && finalParts[1].contains("__hdnea__")) {
+                            String extracted = finalParts[1].trim();
+                            return extracted;
+                        }
+                    }
+
+                    if (response.body() != null) {
+                        String rawResponse = response.body().string();
+                        Log.d(TAG, "Raw Response Fetched: " + rawResponse);
+                        String extracted = extractCookieFromRawData(rawResponse);
+                        return extracted;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Cookie Fetch Error: " + e.getMessage());
+        }
+        return "";
+    }
+
+    // 🔥 MAIN PARSE INTERFACE
+    public static List<ChannelItem> parse(Context context, String content, String cUrl) {
+        appContext = context != null ? context.getApplicationContext() : null;
+        if (content == null) return new ArrayList<>();
+        content = content.trim();
+
+        // 🌟 Auto-detect EPG URL from M3U Header if present
+        if (content.contains("url-tvg=\"") || content.contains("x-tvg-url=\"")) {
+            String headerEpg = "";
+            if (content.contains("url-tvg=\"")) headerEpg = extractValue(content, "url-tvg=\"");
+            else if (content.contains("x-tvg-url=\"")) headerEpg = extractValue(content, "x-tvg-url=\"");
+
+            if (!headerEpg.isEmpty()) {
+                EpgManager.getInstance().loadEpg(headerEpg, null);
+            }
+        }
+
+        String externalCookie = (cUrl != null && !cUrl.isEmpty()) ? fetchCookieSync(cUrl) : "";
+
+        if (content.startsWith("[")) {
+            return parseJson(content, externalCookie);
+        } else {
+            return parseM3u(content, externalCookie);
+        }
+    }
+
+    // Legacy Overloads
+    public static List<ChannelItem> parse(String content, String cUrl) {
+        return parse(null, content, cUrl);
+    }
+
+    public static List<ChannelItem> parse(String content) {
+        return parse(null, content, "");
+    }
+
+    private static List<ChannelItem> parseM3u(String data, String externalCookie) {
+        List<ChannelItem> tempChannels = new ArrayList<>();
+
+        String[] blocks;
+        boolean splitByKodi = data.contains("#KODIPROP:inputstream.adaptive.license_type=") &&
+                data.indexOf("#KODIPROP") < data.indexOf("#EXTINF");
+
+        blocks = splitByKodi ? data.split("#KODIPROP:inputstream.adaptive.license_type=") : data.split("#EXTINF");
+
+        for (String block : blocks) {
+            block = block.trim();
+            if (block.isEmpty() || block.startsWith("#EXTM3U") || block.startsWith("#DATE"))
+                continue;
+
+            String fullBlock = splitByKodi ? "#KODIPROP:inputstream.adaptive.license_type=" + block : "#EXTINF" + block;
+            String name = "", logo = "", group = "General", licenseKey = "", userAgent = "", inlineCookie = "", referrer = "", origin = "", url = "";
+            String tvgId = "", tvgName = "";
+
+            String[] lines = fullBlock.split("\\r?\\n");
+            boolean isMultiLine = lines.length > 1;
+
+            if (isMultiLine) {
+                for (String line : lines) {
+                    line = line.trim();
+                    if (line.isEmpty()) continue;
+
+                    if (line.startsWith("#EXTINF")) {
+                        tvgId = line.contains("tvg-id=\"") ? extractValue(line, "tvg-id=\"") : "";
+                        tvgName = line.contains("tvg-name=\"") ? extractValue(line, "tvg-name=\"") : "";
+                        logo = line.contains("tvg-logo=\"") ? extractValue(line, "tvg-logo=\"") : "";
+                        group = line.contains("group-title=\"") ? extractValue(line, "group-title=\"") : "General";
+                        name = !tvgName.isEmpty() ? tvgName : (line.contains(",") ? line.substring(line.lastIndexOf(",") + 1).trim() : "Unknown");
+                    }
+                    if (line.startsWith(",")) {
+                        name = line.substring(1).trim();
+                    }
+
+                    // Handling #EXTVLCOPT styles
+                    if (line.startsWith("#EXTVLCOPT:")) {
+                        String optContent = line.substring(11).trim();
+                        if (optContent.startsWith("http-user-agent=") || optContent.startsWith("user-agent=")) {
+                            userAgent = optContent.substring(optContent.indexOf('=') + 1).trim();
+                        } else if (optContent.startsWith("http-referrer=") || optContent.startsWith("referrer=")) {
+                            referrer = optContent.substring(optContent.indexOf('=') + 1).trim();
+                        } else if (optContent.startsWith("http-origin=") || optContent.startsWith("origin=")) {
+                            origin = optContent.substring(optContent.indexOf('=') + 1).trim();
+                        } else if (optContent.startsWith("http-cookie=") || optContent.startsWith("cookie=")) {
+                            inlineCookie = optContent.substring(optContent.indexOf('=') + 1).trim();
+                        } else if (optContent.startsWith("http-extra-headers=")) {
+                            String extraHeader = optContent.substring(19).trim();
+                            if (extraHeader.toLowerCase().startsWith("origin:")) {
+                                origin = extraHeader.substring(7).trim();
+                            } else if (extraHeader.toLowerCase().startsWith("referer:")) {
+                                referrer = extraHeader.substring(8).trim();
+                            } else if (extraHeader.toLowerCase().startsWith("cookie:")) {
+                                inlineCookie = extraHeader.substring(7).trim();
+                            }
+                        }
+                    }
+
+                    if (line.contains("license_key=")) {
+                        int keyStart = line.indexOf("license_key=") + 12;
+                        int keyEnd = line.contains("http") ? line.indexOf("http") : line.length();
+                        licenseKey = (keyEnd > keyStart) ? line.substring(keyStart, keyEnd).trim() : line.substring(keyStart).trim();
+                        if (licenseKey.contains("#"))
+                            licenseKey = licenseKey.substring(0, licenseKey.indexOf("#")).trim();
+                    }
+
+                    if (line.contains("user-agent=") || line.contains("http-user-agent=")) {
+                        int uaIdx = line.contains("http-user-agent=") ? line.indexOf("http-user-agent=") + 16 : line.indexOf("user-agent=") + 11;
+                        userAgent = line.substring(uaIdx).trim();
+                    }
+
+                    if (line.contains("http-referrer=") || line.contains("referrer=")) {
+                        int refIdx = line.contains("http-referrer=") ? line.indexOf("http-referrer=") + 14 : line.indexOf("referrer=") + 9;
+                        referrer = line.substring(refIdx).trim();
+                    }
+                    if (line.contains("http-origin=") || line.contains("origin=")) {
+                        int orgIdx = line.contains("http-origin=") ? line.indexOf("http-origin=") + 12 : line.indexOf("origin=") + 7;
+                        origin = line.substring(orgIdx).trim();
+                    }
+
+                    // #EXTHTTP JSON Parsing
+                    if (line.startsWith("#EXTHTTP:")) {
+                        try {
+                            String jsonPart = line.substring(9).trim();
+                            JSONObject httpObj = new JSONObject(jsonPart);
+
+                            if (httpObj.has("cookie")) inlineCookie = httpObj.optString("cookie");
+                            else if (httpObj.has("Cookie"))
+                                inlineCookie = httpObj.optString("Cookie");
+
+                            if (httpObj.has("Origin")) origin = httpObj.optString("Origin");
+                            else if (httpObj.has("origin")) origin = httpObj.optString("origin");
+
+                            if (httpObj.has("Referer")) referrer = httpObj.optString("Referer");
+                            else if (httpObj.has("referer"))
+                                referrer = httpObj.optString("referer");
+                        } catch (Exception ignored) {
+                        }
+                    }
+
+                    // 🛠️ Strict Stream URL Detection
+                    if (line.contains("http") && !line.startsWith("#") && !line.contains("license_key=")) {
+                        String potentialUrl = line;
+                        if (potentialUrl.indexOf("http") != potentialUrl.lastIndexOf("http") && !potentialUrl.contains(".m3u8") && !potentialUrl.contains(".mpd")) {
+                            potentialUrl = potentialUrl.substring(potentialUrl.lastIndexOf("http")).trim();
+                        }
+                        int urlEnd = potentialUrl.length();
+                        if (potentialUrl.contains("|")) {
+                            urlEnd = potentialUrl.indexOf("|");
+                        }
+                        String extracted = potentialUrl.substring(0, urlEnd).trim();
+
+                        if (extracted.contains("m3u8") || extracted.contains("mpd") || extracted.contains("bpk-tv") || (!url.contains("m3u8") && !url.contains("mpd"))) {
+                            url = extracted;
+                        }
+                    }
+                }
+            }
+
+            // Fallback check if URL is still empty
+            if (url.isEmpty() || !isMultiLine) {
+                for (String line : lines) {
+                    line = line.trim();
+                    if (!line.startsWith("#") && line.contains("http")) {
+                        int urlStart = line.indexOf("http");
+                        int urlEnd = line.length();
+                        if (line.contains("|")) urlEnd = line.indexOf("|", urlStart);
+                        url = line.substring(urlStart, urlEnd).trim();
+                        break;
+                    }
+                }
+            }
+
+            if (userAgent.isEmpty()) userAgent = DEFAULT_UA;
+
+            if (!url.isEmpty()) {
+                if (url.contains("?")) {
+                    String[] parts = url.split("\\?");
+                    if (parts.length > 1 && parts[1].contains("__hdnea__")) {
+                        if (inlineCookie.isEmpty()) inlineCookie = parts[1].trim();
+                        url = parts[0];
+                    }
+                }
+
+                StringBuilder finalUrl = new StringBuilder(url);
+
+                String cookieToUse = !externalCookie.isEmpty() ? externalCookie : inlineCookie;
+
+                if (finalUrl.toString().contains("|")) {
+                    finalUrl = new StringBuilder(finalUrl.substring(0, finalUrl.indexOf("|")));
+                }
+
+                boolean isFirstParam = true;
+
+                if (!cookieToUse.isEmpty()) {
+                    finalUrl.append(isFirstParam ? "|" : "&").append("Cookie=").append(cookieToUse);
+                    isFirstParam = false;
+                }
+
+                if (!userAgent.isEmpty()) {
+                    finalUrl.append(isFirstParam ? "|" : "&").append("User-Agent=").append(userAgent);
+                    isFirstParam = false;
+                }
+
+                if (!referrer.isEmpty()) {
+                    finalUrl.append(isFirstParam ? "|" : "&").append("Referer=").append(referrer);
+                    isFirstParam = false;
+                }
+
+                if (!origin.isEmpty()) {
+                    finalUrl.append(isFirstParam ? "|" : "&").append("Origin=").append(origin);
+                    isFirstParam = false;
+                }
+
+                if (!licenseKey.isEmpty()) {
+                    finalUrl.append(isFirstParam ? "|" : "&").append("drmScheme=clearkey");
+                    finalUrl.append("&drmLicense=").append(licenseKey);
+                }
+
+                ChannelItem item = new ChannelItem();
+                item.setName(name.isEmpty() ? "Channel" : name);
+                item.setTvgId(tvgId);
+                item.setTvgName(tvgName);
+                item.setLogoUrl(logo);
+                item.setGroupTitle(group);
+                item.setStreamUrl(finalUrl.toString());
+
+                tempChannels.add(item);
+            }
+        }
+        return tempChannels;
+    }
+
+    private static String extractValue(String line, String key) {
+        if (!line.contains(key)) return "";
+        int start = line.indexOf(key) + key.length();
+        int end = line.indexOf("\"", start);
+        return (end > start) ? line.substring(start, end) : "";
+    }
+
+    private static List<ChannelItem> parseJson(String jsonContent, String externalCookie) {
+        List<ChannelItem> tempChannels = new ArrayList<>();
+        try {
+            jsonContent = jsonContent != null ? jsonContent.trim() : "";
+            if (jsonContent.isEmpty()) {
+                return tempChannels;
+            }
+
+            JSONArray jsonArray;
+            if (jsonContent.startsWith("{")) {
+                jsonArray = new JSONArray();
+                jsonArray.put(new JSONObject(jsonContent));
+            } else {
+                jsonArray = new JSONArray(jsonContent);
+            }
+
+            for (int i = 0; i < jsonArray.length(); i++) {
+                JSONObject obj = jsonArray.getJSONObject(i);
+
+                // Channel metadata extraction
+                String name = obj.optString("name", obj.optString("title", "Channel"));
+                String logo = obj.optString("logo", obj.optString("image_url", ""));
+                String group = obj.optString("group", obj.optString("category", "General"));
+                String url = obj.optString("url", obj.optString("stream_url", obj.optString("mpd_url", "")));
+                String tvgId = obj.optString("tvg_id", obj.optString("channel_id", obj.optString("id", "")));
+                String tvgName = obj.optString("tvg_name", name);
+
+                // User-Agent extraction
+                String userAgent = obj.optString("user_agent", DEFAULT_UA);
+
+                // Cookie extraction (Direct + Nested headers object)
+                String inlineCookie = obj.optString("cookie", obj.optString("Cookie", ""));
+                if (inlineCookie.isEmpty() && obj.has("headers")) {
+                    JSONObject headersObj = obj.optJSONObject("headers");
+                    if (headersObj != null) {
+                        inlineCookie = headersObj.optString("cookie", headersObj.optString("Cookie", ""));
+                        if (userAgent.equals(DEFAULT_UA)) {
+                            userAgent = headersObj.optString("user_agent", headersObj.optString("User-Agent", DEFAULT_UA));
+                        }
+                    }
+                }
+
+                // DRM ClearKey extraction (Direct strings vs Nested clearkey object)
+                String licenseKey = "";
+                String key = obj.optString("key", "");
+                String keyId = obj.optString("keyId", "");
+
+                if (obj.has("clearkey")) {
+                    JSONObject clearkeyObj = obj.optJSONObject("clearkey");
+                    if (clearkeyObj != null && clearkeyObj.length() > 0) {
+                        Iterator<String> keys = clearkeyObj.keys();
+                        if (keys.hasNext()) {
+                            String parsedKeyId = keys.next();
+                            String parsedKey = clearkeyObj.optString(parsedKeyId, "");
+                            if (!parsedKeyId.isEmpty() && !parsedKey.isEmpty()) {
+                                licenseKey = parsedKeyId + ":" + parsedKey;
+                            }
+                        }
+                    }
+                }
+
+                // Fallback to legacy keyId/key format
+                if (licenseKey.isEmpty()) {
+                    if (!keyId.isEmpty() && !key.isEmpty()) {
+                        licenseKey = keyId + ":" + key;
+                    } else if (!key.isEmpty()) {
+                        licenseKey = key;
+                    }
+                }
+
+                // URL construction
+                if (!url.isEmpty()) {
+                    StringBuilder finalUrl = new StringBuilder(url);
+
+                    if (finalUrl.toString().contains("|")) {
+                        finalUrl = new StringBuilder(finalUrl.substring(0, finalUrl.indexOf("|")));
+                    }
+
+                    String cookieToUse = (externalCookie != null && !externalCookie.trim().isEmpty())
+                            ? externalCookie
+                            : inlineCookie;
+
+                    boolean isFirstParam = true;
+
+                    if (!cookieToUse.isEmpty()) {
+                        finalUrl.append(isFirstParam ? "|" : "&").append("Cookie=").append(cookieToUse);
+                        isFirstParam = false;
+                    }
+
+                    if (!userAgent.isEmpty()) {
+                        finalUrl.append(isFirstParam ? "|" : "&").append("User-Agent=").append(userAgent);
+                        isFirstParam = false;
+                    }
+
+                    if (!licenseKey.isEmpty()) {
+                        finalUrl.append(isFirstParam ? "|" : "&").append("drmScheme=clearkey");
+                        finalUrl.append("&drmLicense=").append(licenseKey);
+                    }
+
+                    ChannelItem item = new ChannelItem();
+                    item.setName(name);
+                    item.setTvgId(tvgId);
+                    item.setTvgName(tvgName);
+                    item.setLogoUrl(logo);
+                    item.setGroupTitle(group);
+                    item.setStreamUrl(finalUrl.toString());
+
+                    tempChannels.add(item);
+                }
+            }
+        } catch (Exception e) {
+            Log.e("M3UParser", "JSON Parsing Error: " + e.getMessage());
+        }
+        return tempChannels;
+    }
+}
