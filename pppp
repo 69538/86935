@@ -2775,7 +2775,14 @@ public class PlayerActivity extends AppCompatActivity {
 
             // ✅ Naya Safe Code (Purana logic safe rahega aur tokens strip nahi honge)
             String cleanStreamUrl = streamUrl;
-            if (cleanStreamUrl.contains("?") && !cleanStreamUrl.contains(".m3u8") && !cleanStreamUrl.contains(".mpd")) {
+
+            // 🔥 Permanent Fix: Chahe Emby ho ya koi bhi .mkv / query-params wali file, parameters mat kato!
+            boolean isDirectMediaWithParams = cleanStreamUrl.contains("api_key=")
+                    || cleanStreamUrl.contains(".mkv")
+                    || cleanStreamUrl.contains(".mp4")
+                    || cleanStreamUrl.contains(".avi");
+
+            if (!isDirectMediaWithParams && cleanStreamUrl.contains("?") && !cleanStreamUrl.contains(".m3u8") && !cleanStreamUrl.contains(".mpd")) {
                 cleanStreamUrl = cleanStreamUrl.split("\\?")[0];
             }
 
